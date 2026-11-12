@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Polyglot",
+        "description": "Добавляет в боковое меню страницу «Translations». Каждый пользователь видит названия зон, устройств, объектов и панелей на языке своего профиля."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Polyglot уже настроен."
+    }
+  }
+}

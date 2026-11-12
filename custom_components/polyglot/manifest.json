@@ -1,0 +1,14 @@
+{
+  "domain": "polyglot",
+  "name": "Polyglot",
+  "codeowners": ["@yuzi-co"],
+  "config_flow": true,
+  "dependencies": ["frontend", "http", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/yuzi-co/ha-polyglot",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/yuzi-co/ha-polyglot/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.1"
+}
