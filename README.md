@@ -19,6 +19,10 @@ automations, history and entity IDs stay exactly as they are.
 Original names are taken to be in the system language (Settings → System → General). A user whose profile
 language matches it, or who has no translations, sees the original names.
 
+## Requirements
+
+Home Assistant 2026.3 or newer. Tested on 2026.3, 2026.6, 2026.9 and 2026.11.
+
 ## Install
 
 1. HACS → Custom repositories → add this repository as an *Integration*, then install Polyglot. Or copy
