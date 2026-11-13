@@ -1,7 +1,7 @@
 name: Home Assistant beta
 
-# Polyglot relies on frontend internals, so check it against what is coming: the current beta (in a browser) and
-# Home Assistant's development branch (the Python tests, through the latest pytest-homeassistant-custom-component).
+# Polyglot relies on frontend internals, so check it against what is coming: the current beta and stable releases in a
+# browser, and the Python tests on the newest Home Assistant the latest pytest-homeassistant-custom-component supports.
 on:
   schedule:
     - cron: "0 6 1,15 * *" # twice a month: betas start on the last Wednesday of the month
@@ -25,7 +25,7 @@ jobs:
       - if: failure()
         run: docker logs hapg-${{ matrix.version }} 2>&1 | tail -100
 
-  python-dev:
+  python-latest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

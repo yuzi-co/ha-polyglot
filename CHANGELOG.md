@@ -19,7 +19,7 @@ Translating a whole home is now mostly review work.
 - **Translate dashboard text for me too**: admins see original dashboard text by default and can opt in. Dashboards
   they save while translated get their text turned back into the original first.
 - Tests for the integration (setup, storage, WebSocket API) and CI: hassfest, the HACS check, ruff, pytest and the
-  frontend tests on every push, plus a twice-monthly check against the Home Assistant beta in a real browser.
+  frontend tests on every push, plus a twice-monthly check of the current beta and stable releases in a real browser.
 - `tools/ai-eval`: runs the AI translation on a fixed set of hard names and writes a review sheet.
 
 ### Changed
