@@ -182,26 +182,67 @@ export function untranslateConfig(config, dict) {
   return translateConfig(config, (s) => (inverse.has(s.trim()) ? inverse.get(s.trim()) : s));
 }
 
+const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'off']);
+const words = (s) => (String(s).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter((w) => !STOP_WORDS.has(w));
+
+/**
+ * Picks existing translations that share words with the items, so the AI reuses the user's terms.
+ * known: [{ text, translation }]. Exact matches come first, then the entries sharing the most words.
+ */
+export function pickGlossary(items, known, max = 60) {
+  const wanted = new Set(items.flatMap((i) => words(i.text)));
+  const exact = new Set(items.map((i) => i.text));
+  const seen = new Set();
+  const scored = [];
+  for (const { text, translation } of known) {
+    if (!text || !translation || seen.has(text)) continue;
+    const hits = exact.has(text) ? 1000 : words(text).filter((w) => wanted.has(w)).length;
+    if (!hits) continue;
+    seen.add(text);
+    scored.push({ text, translation, hits });
+  }
+  return scored
+    .sort((a, b) => b.hits - a.hits || a.text.length - b.text.length)
+    .slice(0, max)
+    .map(({ text, translation }) => ({ text, translation }));
+}
+
 /**
  * Prompt for translating editor rows with any AI (Home Assistant's AI Task, or pasted into a chat by hand).
- * items: [{ key, text, about }]. The reply is a JSON object mapping each key to its translation.
+ * items: [{ key, text, about }]; glossary: [{ text, translation }] the user already has.
+ * The reply is a JSON object mapping each key to its translation.
  */
-export function buildTranslationPrompt({ from, to, fromName, toName, items }) {
+export function buildTranslationPrompt({ from, to, fromName, toName, items, glossary = [] }) {
   const name = (n, code) => (n && n !== code ? `${n} (${code})` : code);
-  return [
+  const lines = [
     `Translate names shown in a Home Assistant smart-home app from ${name(fromName, from)} to ${name(toName, to)}.`,
     '',
     'Rules:',
-    '- Short, natural labels, the way a native speaker would expect them on a home dashboard. Not word for word.',
-    '- Keep brand, model and product names, codes, numbers and units unchanged (for example "PAX Calima", "X40 Ultra", "PM2.5").',
+    '- Short, natural, grammatically correct labels, the way a native speaker would expect them on a home dashboard.',
+    '- Translate the meaning, not the words. Names from integrations are often terse ("Distance reset" is the distance since the last reset). Use "about" (device, type, unit, current value) to work out what is meant.',
+    '- Keep brand, model and product names, codes and numbers unchanged (for example "PAX Calima", "X40 Ultra", "PM2.5"). Unit symbols take the standard form of the target language, if it has one.',
+    '- Translate everyday abbreviations ("AC" is air conditioner, "est." is estimate) the way the target language usually shortens them.',
+    '- A room or place at the end of a name ("Route Bedroom", "Wetness Kitchen") is a qualifier: join it the way the language does it (a preposition, a case or a separator), not as two capitalized words side by side.',
     '- Many entity names are shown after their device name ("Breezer" + "Air mode"): translate only the given part, so that both read well together.',
-    "- Use the target language's usual capitalization for labels.",
-    '- "about" says what the text is and where it appears. Use it to choose the right meaning; do not translate it.',
+    '- Be consistent: the same word or phrase gets the same translation everywhere, in every item.',
+    '- Keep different names distinguishable: two different originals must not get the same translation.',
+    "- ALL CAPS stays ALL CAPS. Otherwise use the target language's usual capitalization for labels.",
+    '- "about" says what the text is and where it appears. Do not translate it.',
+  ];
+  if (glossary.length) {
+    lines.push(
+      '',
+      'Glossary of translations the user already has. Reuse these terms and their style:',
+      JSON.stringify(Object.fromEntries(glossary.map((g) => [g.text, g.translation])), null, 1),
+    );
+  }
+  lines.push(
     '',
     'Reply with only a JSON object that maps every "key" below to its translation. No comments, no code fences.',
     '',
     JSON.stringify(items.map(({ key, text, about }) => (about ? { key, text, about } : { key, text })), null, 1),
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /**

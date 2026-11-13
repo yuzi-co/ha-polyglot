@@ -1,7 +1,7 @@
 // Run with: node --test tests/
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTranslationPrompt, collectConfig, createTranslator, mapRecord, parseTranslationReply, pickLanguage, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
+import { buildTranslationPrompt, collectConfig, createTranslator, mapRecord, parseTranslationReply, pickGlossary, pickLanguage, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
 
 test('pickLanguage', () => {
   assert.equal(pickLanguage('ru', 'en', ['ru']), 'ru');
@@ -122,6 +122,21 @@ test('translation prompt and reply parsing', () => {
   assert.match(prompt, /from English \(en\) to Russian \(ru\)/);
   assert.match(prompt, /"key": "area:living_room"/);
   assert.doesNotMatch(prompt, /"about": undefined/);
+  assert.doesNotMatch(prompt, /Glossary/);
+  const glossary = pickGlossary(
+    [{ text: 'Living room lamp' }, { text: 'Bar' }],
+    [
+      { text: 'Bar', translation: 'Бар' },
+      { text: 'Kitchen lamp', translation: 'Лампа на кухне' },
+      { text: 'Bathroom', translation: 'Ванная' },
+      { text: 'Living room', translation: 'Гостиная' },
+      { text: 'Living room', translation: 'Зал' },
+      { text: 'The fan', translation: 'Вентилятор' },
+    ],
+  );
+  assert.deepEqual(glossary.map((g) => g.text), ['Bar', 'Living room', 'Kitchen lamp']);
+  assert.equal(glossary[1].translation, 'Гостиная');
+  assert.match(buildTranslationPrompt({ from: 'en', to: 'ru', items, glossary }), /Glossary[^]*"Bar": "Бар"/);
   const valid = new Set(items.map((i) => i.key));
   // Prose and code fences around the JSON, an unknown key, an empty value.
   const reply = 'Here you go:\n```json\n{"area:living_room": " Гостиная ", "text:Bar": "", "area:other": "x"}\n```';

@@ -1,7 +1,7 @@
 // Polyglot editor: the admin-only "Translations" panel. Plain custom element, no build step.
 // Lists areas, floors, devices, entities and dashboard text with one input per row for the chosen language.
 // core.js gets this module's ?v= query too, so a new release never runs against a cached old core.
-const { buildTranslationPrompt, collectConfig, isDevicePrefixed, parseTranslationReply } = await import(
+const { buildTranslationPrompt, collectConfig, isDevicePrefixed, parseTranslationReply, pickGlossary } = await import(
   new URL(`./core.js${new URL(import.meta.url).search}`, import.meta.url).href
 );
 
@@ -174,10 +174,21 @@ class PolyglotPanel extends HTMLElement {
           const ctx = [id, prefixed && device ? `after device: ${device.name_by_user || device.name}` : ''].filter(Boolean).join(' · ');
           const domain = id.split('.')[0];
           const dc = s.attributes.device_class;
+          const unit = s.attributes.unit_of_measurement;
+          const now = ['unknown', 'unavailable', ''].includes(s.state) || s.state.length > 40 ? '' : `now ${s.state}${unit ? ` ${unit}` : ''}`;
+          const a = s.attributes;
+          const range = a.min !== undefined && a.max !== undefined ? `range ${a.min} to ${a.max}` : '';
+          const options = Array.isArray(a.options) && a.options.length ? `options: ${a.options.slice(0, 6).join(', ')}` : '';
+          const model = device && [device.manufacturer, device.model].filter(Boolean).join(' ');
           const about = [
             prefixed && device ? `entity name, shown after device name "${device.name_by_user || device.name}"` : 'entity name',
+            device && model ? `device: ${model}` : '',
             `a ${domain}${dc ? ` (${dc})` : ''}`,
-          ].join(', ');
+            unit && `unit ${unit}`,
+            range,
+            options,
+            now,
+          ].filter(Boolean).join(', ');
           return { key: `entity:${id}`, original, context: ctx, about };
         })
         .filter(Boolean);
@@ -314,11 +325,35 @@ class PolyglotPanel extends HTMLElement {
     return this._rows().filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]);
   }
 
+  // The original text behind a translation key, from any tab.
+  _originalOf(key) {
+    const h = this._hass;
+    const i = key.indexOf(':');
+    const type = key.slice(0, i);
+    const id = key.slice(i + 1);
+    if (type === 'text' || type === 'state') return id;
+    if (type === 'area') return h.areas[id] && h.areas[id].name;
+    if (type === 'floor') return h.floors && h.floors[id] && h.floors[id].name;
+    if (type === 'device') return h.devices[id] && (h.devices[id].name_by_user || h.devices[id].name);
+    if (type === 'entity') {
+      const e = h.entities[id];
+      const s = h.states[id];
+      if (!s) return undefined;
+      return isDevicePrefixed(e) ? e.name : s.attributes.friendly_name;
+    }
+    return undefined;
+  }
+
   _promptFor(rows) {
     const names = (code) => { try { return new Intl.DisplayNames(['en'], { type: 'language' }).of(code); } catch (e) { return code; } };
+    const items = rows.map((r) => ({ key: r.key, text: r.original, about: r.about }));
+    // Saved translations first, then this run's suggestions, so later batches follow earlier ones.
+    const dict = this._config.translations[this._language] || {};
+    const drafts = this._draftsFor === this._language ? this._drafts || {} : {};
+    const known = [...Object.entries(dict), ...Object.entries(drafts)].map(([k, v]) => ({ text: this._originalOf(k), translation: v }));
     return buildTranslationPrompt({
       from: this._config.primary, to: this._language, fromName: names(this._config.primary), toName: names(this._language),
-      items: rows.map((r) => ({ key: r.key, text: r.original, about: r.about })),
+      items, glossary: pickGlossary(items, known),
     });
   }
 
@@ -336,24 +371,43 @@ class PolyglotPanel extends HTMLElement {
     const entity_id = this._aiEntity || this._userSettings.ai_task_entity || this._aiTasks()[0];
     const rows = this._missingRows();
     if (!entity_id || !rows.length) return;
-    const BATCH = 40;
+    const BATCH = 30;
     this._aiBusy = { done: 0, total: rows.length };
     this._error = null;
     this._render();
-    try {
-      for (let i = 0; i < rows.length; i += BATCH) {
-        const batch = rows.slice(i, i + BATCH);
+    let failed = 0;
+    let lastError = null;
+    // A batch that fails (for example the model's output limit) is split in half and retried, down to single rows;
+    // what still fails is left missing and reported, the rest of the run goes on.
+    const run = async (batch) => {
+      try {
         const res = await this._ws({
           type: 'call_service', domain: 'ai_task', service: 'generate_data', return_response: true,
           service_data: { task_name: 'Polyglot translation', entity_id, instructions: this._promptFor(batch) },
         });
         const data = res && res.response ? res.response.data : undefined;
         this._addDrafts(parseTranslationReply(data, new Set(batch.map((r) => r.key)), this._language));
-        this._aiBusy = { done: Math.min(i + BATCH, rows.length), total: rows.length };
+        this._aiBusy = { done: this._aiBusy.done + batch.length, total: rows.length };
         this._render();
+      } catch (e) {
+        if (batch.length > 1) {
+          const half = Math.ceil(batch.length / 2);
+          await run(batch.slice(0, half));
+          await run(batch.slice(half));
+          return;
+        }
+        // Nothing has worked yet even for a single row: the AI itself is failing, so stop instead of trying every row.
+        if (!this._aiBusy.done) throw e;
+        failed += 1;
+        lastError = e;
+        this._aiBusy = { done: this._aiBusy.done + 1, total: rows.length };
       }
+    };
+    try {
+      for (let i = 0; i < rows.length; i += BATCH) await run(rows.slice(i, i + BATCH));
     } finally {
       this._aiBusy = null;
+      if (failed) this._error = `${count(failed, 'row', 'rows')} could not be translated (${(lastError && lastError.message) || lastError}). Try again for those.`;
       this._render();
     }
   }
