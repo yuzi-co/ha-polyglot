@@ -393,6 +393,8 @@ class PolyglotPanel extends HTMLElement {
     for (const [k, v] of Object.entries(values)) {
       if (v) dict[k] = v; else delete dict[k];
       delete drafts[k];
+      const input = this.shadowRoot.querySelector(`input[data-key="${CSS.escape(k)}"]`);
+      if (input) input.defaultValue = v || '';
     }
   }
 
@@ -649,6 +651,9 @@ class PolyglotPanel extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>
+        /* The editor's own text is English, so it stays left to right in a right-to-left UI (Hebrew, Arabic);
+           names and translations get dir="auto" and follow their own script. */
+        :host { direction: ltr; }
         :host { display: block; min-height: 100vh; background: var(--primary-background-color); color: var(--primary-text-color);
           font-family: var(--ha-font-family-body, Roboto, sans-serif); }
         header { display: flex; align-items: center; gap: 8px; height: var(--header-height, 56px); padding: 0 12px;
@@ -739,14 +744,14 @@ class PolyglotPanel extends HTMLElement {
                 ${flagCount ? `<label><input type="checkbox" id="flagged-only" ${this._flaggedOnly ? 'checked' : ''}> Only the ${count(flagCount, 'one', 'ones')} to check here</label>` : ''}</div>` : ''}
               ${this._pasting ? `
                 ${this._manualCopy ? `<div class="muted">Copying was blocked. Select this text, copy it into an AI chat:</div><textarea readonly id="manual-copy">${esc(this._manualCopy)}</textarea>` : ''}
-                <textarea id="paste-box" placeholder="Paste the AI's reply here (the JSON with translations)"></textarea>
+                <textarea id="paste-box" dir="auto" placeholder="Paste the AI's reply here (the JSON with translations)"></textarea>
                 <div class="bar" style="margin-top:8px"><button id="paste-apply">Use reply</button><button id="paste-cancel">Cancel</button></div>` : ''}
             </div>
             <div class="card">
               ${rows.length ? rows.map((r) => `
                 <div class="row${r.orphan ? ' orphan' : ''}">
-                  <div class="orig">${esc(r.original)}${r.context ? `<span class="ctx">${esc(r.context)}</span>` : ''}${flags[r.key] ? `<span class="flag">Check: ${esc(flags[r.key].join(', '))}</span>` : ''}</div>
-                  <input type="text" data-key="${esc(r.key)}" class="${drafts[r.key] && !dict[r.key] ? 'draft' : ''}" value="${esc(dict[r.key] || drafts[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}">
+                  <div class="orig"><bdi>${esc(r.original)}</bdi>${r.context ? `<span class="ctx" dir="auto">${esc(r.context)}</span>` : ''}${flags[r.key] ? `<span class="flag">Check: ${esc(flags[r.key].join(', '))}</span>` : ''}</div>
+                  <input type="text" data-key="${esc(r.key)}" class="${drafts[r.key] && !dict[r.key] ? 'draft' : ''}" value="${esc(dict[r.key] || drafts[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}" dir="auto">
                 </div>`).join('') : '<div class="empty muted">Nothing here.</div>'}
             </div>` : '<div class="empty muted">Add a language to start, for example ru, de or fr.</div>'}
         ` : ''}
@@ -804,6 +809,8 @@ class PolyglotPanel extends HTMLElement {
         if (input.value.trim() === before) return;
         try {
           await this._save(input.dataset.key, input.value);
+          // Saved: no longer unsaved typing, so a later redraw shows the stored value, not this text.
+          input.defaultValue = input.value.trim();
           if (this._drafts) delete this._drafts[input.dataset.key];
           input.classList.remove('draft');
           input.classList.toggle('saved', Boolean(input.value.trim()));

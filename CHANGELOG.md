@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Right-to-left languages (tested with Hebrew): the Translations page keeps its English text left to right in a
+  Hebrew or Arabic interface instead of scrambling it, and every name and translation field follows its own
+  script's direction, so Hebrew typed in an English interface reads right to left.
+- A field saved in the editor no longer shows its old typed text again after the page redraws.
+
 ## 0.2.0 (2026-11-13)
 
 Translating a whole home is now mostly review work.

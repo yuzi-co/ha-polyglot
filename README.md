@@ -43,7 +43,8 @@ language matches it, or who has no translations, sees the original names.
 
 ## Requirements
 
-Home Assistant 2026.3 or newer. Tested on 2026.3, 2026.6, 2026.9 and 2026.11.
+Home Assistant 2026.3 or newer. Tested on 2026.3, 2026.6, 2026.9 and 2026.11, and with a right-to-left language
+(Hebrew).
 
 ## Install
 
