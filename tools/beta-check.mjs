@@ -15,13 +15,14 @@ const inject = readFileSync(join(dir, 'inject.js'), 'utf8');
 const check = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'browser-check.js'), 'utf8');
 
 const browser = await chromium.launch();
-const page = await browser.newPage();
+const context = await browser.newContext();
+// Logs in before any of the page's own scripts run (stores the test tokens like the frontend does).
+await context.addInitScript(inject);
+const page = await context.newPage();
 const warnings = [];
 page.on('console', (m) => { if (m.text().includes('[polyglot]')) warnings.push(m.text()); });
 page.on('pageerror', (e) => warnings.push(`page error: ${e.message}`));
 
-await page.goto(session.base);
-await page.evaluate(inject);
 await page.goto(`${session.base}/pg-test/main`);
 await page.waitForFunction(() => {
   const ha = document.querySelector('home-assistant');
