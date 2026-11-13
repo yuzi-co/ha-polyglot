@@ -1,7 +1,7 @@
 // Run with: node --test tests/
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectConfig, createTranslator, mapRecord, pickLanguage, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
+import { buildTranslationPrompt, collectConfig, createTranslator, mapRecord, parseTranslationReply, pickLanguage, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
 
 test('pickLanguage', () => {
   assert.equal(pickLanguage('ru', 'en', ['ru']), 'ru');
@@ -114,6 +114,23 @@ test('untranslateConfig restores originals on save', () => {
   assert.equal(out.views[0].cards[0].name, 'Гостиная');
   assert.equal(out.views[0].cards[1].heading, 'Своё');
   assert.equal(untranslateConfig(cfg, {}), cfg);
+});
+
+test('translation prompt and reply parsing', () => {
+  const items = [{ key: 'area:living_room', text: 'Living Room', about: 'room name' }, { key: 'text:Bar', text: 'Bar' }];
+  const prompt = buildTranslationPrompt({ from: 'en', to: 'ru', fromName: 'English', toName: 'Russian', items });
+  assert.match(prompt, /from English \(en\) to Russian \(ru\)/);
+  assert.match(prompt, /"key": "area:living_room"/);
+  assert.doesNotMatch(prompt, /"about": undefined/);
+  const valid = new Set(items.map((i) => i.key));
+  // Prose and code fences around the JSON, an unknown key, an empty value.
+  const reply = 'Here you go:\n```json\n{"area:living_room": " Гостиная ", "text:Bar": "", "area:other": "x"}\n```';
+  assert.deepEqual(parseTranslationReply(reply, valid), { 'area:living_room': 'Гостиная' });
+  // Export format and the array form.
+  assert.deepEqual(parseTranslationReply('{"translations": {"ru": {"text:Bar": "Бар"}}}', valid, 'ru'), { 'text:Bar': 'Бар' });
+  assert.deepEqual(parseTranslationReply([{ key: 'text:Bar', translation: 'Бар' }], valid), { 'text:Bar': 'Бар' });
+  assert.throws(() => parseTranslationReply('no json here', valid), /No JSON/);
+  assert.throws(() => parseTranslationReply('{"a": }', valid), /not valid JSON/);
 });
 
 test('collectConfig finds strings and entity IDs', () => {

@@ -11,6 +11,11 @@ automations, history and entity IDs stay exactly as they are.
 
 - **Translations page** (admin only, sidebar → Translations). One row per area, floor, device, entity and dashboard
   string, one input per row. Pick a language, type, press Enter. Export and import as JSON.
+- **Translate missing with AI**: sends the untranslated names on the current tab, each with a short description of
+  what it is, to an AI Task set up in Home Assistant (Claude, OpenAI, Ollama or any other). Suggestions appear
+  dashed for review and are saved only with *Save all* or by editing a field. Names are sent to that AI provider.
+- **Copy for any AI / Paste reply**: the same request as text for any AI chat or a human translator; paste the
+  JSON reply back to get the same reviewable suggestions.
 - **Overlay** that every page loads. For a user whose profile language has translations, it swaps the names in the
   frontend before any card sees them: dashboards, tiles, more-info dialogs, the sidebar, history and logbook.
 - **Nothing is written back.** Translations live in `.storage/polyglot.translations`. Settings and developer tools

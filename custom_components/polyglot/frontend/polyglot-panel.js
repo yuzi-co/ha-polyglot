@@ -1,7 +1,7 @@
 // Polyglot editor: the admin-only "Translations" panel. Plain custom element, no build step.
 // Lists areas, floors, devices, entities and dashboard text with one input per row for the chosen language.
 // core.js gets this module's ?v= query too, so a new release never runs against a cached old core.
-const { collectConfig, isDevicePrefixed } = await import(
+const { buildTranslationPrompt, collectConfig, isDevicePrefixed, parseTranslationReply } = await import(
   new URL(`./core.js${new URL(import.meta.url).search}`, import.meta.url).href
 );
 
@@ -30,6 +30,8 @@ class PolyglotPanel extends HTMLElement {
     this._dash = null; // { strings: Set, entityIds: Set }
     this._loading = false;
     this._error = null;
+    this._userSettings = {};
+    this._drafts = {};
     // HA may create this element and set its properties before the module finished loading (it awaits core.js).
     // Those values landed as plain own properties that hide the setters below: re-apply them through the setters.
     for (const prop of ['narrow', 'panel', 'route', 'hass']) {
@@ -144,14 +146,17 @@ class PolyglotPanel extends HTMLElement {
     const areaName = (id) => (id && h.areas[id] ? h.areas[id].name : '');
     let rows = [];
     if (this._type === 'area') {
-      rows = Object.values(h.areas).map((a) => ({ key: `area:${a.area_id}`, original: a.name, context: a.area_id }));
+      rows = Object.values(h.areas).map((a) => ({ key: `area:${a.area_id}`, original: a.name, context: a.area_id, about: 'room or area name' }));
     } else if (this._type === 'floor') {
-      rows = Object.values(h.floors || {}).map((f) => ({ key: `floor:${f.floor_id}`, original: f.name, context: f.floor_id }));
+      rows = Object.values(h.floors || {}).map((f) => ({ key: `floor:${f.floor_id}`, original: f.name, context: f.floor_id, about: 'floor name' }));
     } else if (this._type === 'device') {
       rows = Object.values(h.devices)
         .filter((d) => !d.disabled_by && (d.name_by_user || d.name))
         .filter((d) => !this._onlyUsed || usedDevices.has(d.id))
-        .map((d) => ({ key: `device:${d.id}`, original: d.name_by_user || d.name, context: [areaName(d.area_id), d.model].filter(Boolean).join(' · ') }));
+        .map((d) => ({
+          key: `device:${d.id}`, original: d.name_by_user || d.name, context: [areaName(d.area_id), d.model].filter(Boolean).join(' · '),
+          about: ['device name', d.area_id && `in ${areaName(d.area_id)}`, [d.manufacturer, d.model].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+        }));
     } else if (this._type === 'entity') {
       rows = Object.keys(h.states)
         .filter((id) => !this._onlyUsed || used.has(id))
@@ -164,11 +169,17 @@ class PolyglotPanel extends HTMLElement {
           const original = prefixed ? e.name : s.attributes.friendly_name || id;
           const device = e && e.device_id && h.devices[e.device_id];
           const ctx = [id, prefixed && device ? `after device: ${device.name_by_user || device.name}` : ''].filter(Boolean).join(' · ');
-          return { key: `entity:${id}`, original, context: ctx };
+          const domain = id.split('.')[0];
+          const dc = s.attributes.device_class;
+          const about = [
+            prefixed && device ? `entity name, shown after device name "${device.name_by_user || device.name}"` : 'entity name',
+            `a ${domain}${dc ? ` (${dc})` : ''}`,
+          ].join(', ');
+          return { key: `entity:${id}`, original, context: ctx, about };
         })
         .filter(Boolean);
     } else if (this._type === 'text') {
-      rows = [...(this._dash ? this._dash.strings : [])].map((s) => ({ key: `text:${s}`, original: s, context: '' }));
+      rows = [...(this._dash ? this._dash.strings : [])].map((s) => ({ key: `text:${s}`, original: s, context: '', about: 'dashboard title, heading or card label' }));
     } else if (this._type === 'state') {
       // Text states and selectable options the way this page shows them, minus the ones HA already translates
       // into the target language (the target user never sees those in English). Dates and times are skipped.
@@ -192,6 +203,7 @@ class PolyglotPanel extends HTMLElement {
       }
       rows = [...seen].map(([value, ids]) => ({
         key: `state:${value}`, original: value, context: [...ids].slice(0, 3).join(', ') + (ids.size > 3 ? ` +${ids.size - 3}` : ''),
+        about: `state value or option of ${[...ids].slice(0, 3).map((id) => (h.states[id] && h.states[id].attributes.friendly_name) || id).join('; ')}`,
       }));
     }
     const dict = (this._config && this._language && this._config.translations[this._language]) || {};
@@ -255,6 +267,100 @@ class PolyglotPanel extends HTMLElement {
     this._render();
   }
 
+  // Rows of the current tab that have neither a translation nor a pending suggestion.
+  _missingRows() {
+    const dict = this._config.translations[this._language] || {};
+    const drafts = this._drafts || {};
+    return this._rows().filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]);
+  }
+
+  _promptFor(rows) {
+    const names = (code) => { try { return new Intl.DisplayNames(['en'], { type: 'language' }).of(code); } catch (e) { return code; } };
+    return buildTranslationPrompt({
+      from: this._config.primary, to: this._language, fromName: names(this._config.primary), toName: names(this._language),
+      items: rows.map((r) => ({ key: r.key, text: r.original, about: r.about })),
+    });
+  }
+
+  _aiTasks() {
+    return Object.keys(this._hass.states).filter((id) => id.startsWith('ai_task.')).sort();
+  }
+
+  // Suggestions are kept per language until saved or discarded; they are never written without review.
+  _addDrafts(values) {
+    this._drafts = { ...(this._drafts || {}), ...values };
+    this._draftsFor = this._language;
+  }
+
+  async _translateWithAi() {
+    const entity_id = this._aiEntity || this._userSettings.ai_task_entity || this._aiTasks()[0];
+    const rows = this._missingRows();
+    if (!entity_id || !rows.length) return;
+    const BATCH = 40;
+    this._aiBusy = { done: 0, total: rows.length };
+    this._error = null;
+    this._render();
+    try {
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const batch = rows.slice(i, i + BATCH);
+        const res = await this._ws({
+          type: 'call_service', domain: 'ai_task', service: 'generate_data', return_response: true,
+          service_data: { task_name: 'Polyglot translation', entity_id, instructions: this._promptFor(batch) },
+        });
+        const data = res && res.response ? res.response.data : undefined;
+        this._addDrafts(parseTranslationReply(data, new Set(batch.map((r) => r.key)), this._language));
+        this._aiBusy = { done: Math.min(i + BATCH, rows.length), total: rows.length };
+        this._render();
+      }
+    } finally {
+      this._aiBusy = null;
+      this._render();
+    }
+  }
+
+  async _setAiEntity(entity_id) {
+    this._aiEntity = entity_id;
+    const value = { ...(this._userSettings || {}), ai_task_entity: entity_id };
+    await this._ws({ type: 'frontend/set_user_data', key: 'polyglot', value });
+    this._userSettings = value;
+  }
+
+  async _copyForAi() {
+    const rows = this._missingRows();
+    if (!rows.length) return;
+    const text = this._promptFor(rows);
+    try {
+      await navigator.clipboard.writeText(text);
+      this._notice = `Copied ${rows.length} rows. Paste them into any AI chat, then paste its reply here.`;
+    } catch (e) {
+      this._manualCopy = text; // clipboard blocked: show the text to copy by hand
+    }
+    this._pasting = true;
+    this._render();
+  }
+
+  _applyPastedReply(text) {
+    const valid = new Set(this._rows().map((r) => r.key));
+    const found = parseTranslationReply(text, valid, this._language);
+    const n = Object.keys(found).length;
+    if (!n) throw new Error('The reply has no translations for rows on this tab.');
+    this._addDrafts(found);
+    this._pasting = false;
+    this._manualCopy = null;
+    this._notice = `${n} suggestions added. Review them, then Save all.`;
+    this._render();
+  }
+
+  async _saveDrafts() {
+    const values = { ...this._drafts };
+    await this._ws({ type: 'polyglot/set_many', language: this._language, values });
+    const dict = (this._config.translations[this._language] ||= {});
+    Object.assign(dict, values);
+    this._drafts = {};
+    this._notice = `Saved ${Object.keys(values).length} translations.`;
+    this._render();
+  }
+
   _export() {
     const data = { primary: this._config.primary, translations: this._config.translations };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -283,7 +389,13 @@ class PolyglotPanel extends HTMLElement {
     const c = this._config;
     const lang = this._language;
     const dict = (c && lang && c.translations[lang]) || {};
+    if (this._draftsFor !== lang) { this._drafts = {}; this._draftsFor = lang; }
+    const drafts = this._drafts || {};
+    const draftCount = Object.keys(drafts).length;
     const rows = c && lang ? this._rows() : [];
+    const missing = c && lang ? rows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]).length : 0;
+    const aiTasks = this._hass ? this._aiTasks() : [];
+    const aiEntity = this._aiEntity || (this._userSettings && this._userSettings.ai_task_entity) || aiTasks[0];
     const done = rows.filter((r) => dict[r.key]).length;
     const showToggle = ['device', 'entity', 'state'].includes(this._type);
     const focusedKey = this.shadowRoot.activeElement && this.shadowRoot.activeElement.dataset ? this.shadowRoot.activeElement.dataset.key : null;
@@ -316,6 +428,13 @@ class PolyglotPanel extends HTMLElement {
         .row input { width: 100%; box-sizing: border-box; }
         .row input.saved { border-color: var(--success-color, #4caf50); }
         .row.orphan .orig { color: var(--warning-color, #ff9800); }
+        .row input.draft { border-color: var(--primary-color); border-style: dashed; font-style: italic; }
+        .ai { padding: 10px 12px; margin-bottom: 12px; }
+        .ai .bar { margin-bottom: 0; }
+        .ai textarea { width: 100%; box-sizing: border-box; min-height: 120px; margin-top: 8px; font: inherit; font-size: 0.85em;
+          background: var(--input-fill-color, var(--card-background-color)); color: inherit; border: 1px solid var(--divider-color); border-radius: 8px; padding: 8px; }
+        .notice { color: var(--success-color, #4caf50); }
+        button:disabled { opacity: 0.5; cursor: default; }
         .empty, .error { padding: 24px; text-align: center; }
         .error { color: var(--error-color); }
         @media (max-width: 600px) { .row { grid-template-columns: 1fr; gap: 4px; } main { padding: 8px; } }
@@ -354,11 +473,30 @@ class PolyglotPanel extends HTMLElement {
               ${showToggle ? `<label class="muted"><input type="checkbox" id="used" ${this._onlyUsed ? 'checked' : ''}> Only likely visible</label>` : ''}
               <span class="muted">${done} / ${rows.length} translated</span>
             </div>
+            <div class="card ai">
+              <div class="bar">
+                <strong>${missing} missing</strong>
+                ${aiTasks.length ? `
+                  <select id="ai-entity" title="AI used for translating">${aiTasks.map((id) => `<option value="${esc(id)}" ${id === aiEntity ? 'selected' : ''}>${esc((this._hass.states[id].attributes.friendly_name) || id)}</option>`).join('')}</select>
+                  <button id="ai-run" ${!missing || this._aiBusy ? 'disabled' : ''}>${this._aiBusy ? `Translating ${this._aiBusy.done} / ${this._aiBusy.total}…` : 'Translate missing with AI'}</button>` : ''}
+                <button id="ai-copy" ${!missing ? 'disabled' : ''}>Copy for any AI</button>
+                <button id="ai-paste">Paste reply</button>
+              </div>
+              <div class="muted">${aiTasks.length
+    ? 'Sends the missing names on this tab, with a short description of each, to the chosen AI. Suggestions are shown for review and saved only when you choose.'
+    : 'Set up an AI Task in Home Assistant to translate here in one click, or copy the missing names into any AI chat and paste the reply back.'}</div>
+              ${this._notice ? `<div class="notice">${esc(this._notice)}</div>` : ''}
+              ${draftCount ? `<div class="bar" style="margin-top:8px"><span>${draftCount} suggestions to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button></div>` : ''}
+              ${this._pasting ? `
+                ${this._manualCopy ? `<div class="muted">Copying was blocked. Select this text, copy it into an AI chat:</div><textarea readonly id="manual-copy">${esc(this._manualCopy)}</textarea>` : ''}
+                <textarea id="paste-box" placeholder="Paste the AI's reply here (the JSON with translations)"></textarea>
+                <div class="bar" style="margin-top:8px"><button id="paste-apply">Use reply</button><button id="paste-cancel">Cancel</button></div>` : ''}
+            </div>
             <div class="card">
               ${rows.length ? rows.map((r) => `
                 <div class="row${r.orphan ? ' orphan' : ''}">
                   <div class="orig">${esc(r.original)}${r.context ? `<span class="ctx">${esc(r.context)}</span>` : ''}</div>
-                  <input type="text" data-key="${esc(r.key)}" value="${esc(dict[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}">
+                  <input type="text" data-key="${esc(r.key)}" class="${drafts[r.key] && !dict[r.key] ? 'draft' : ''}" value="${esc(dict[r.key] || drafts[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}">
                 </div>`).join('') : '<div class="empty muted">Nothing here.</div>'}
             </div>` : '<div class="empty muted">Add a language to start, for example ru, de or fr.</div>'}
         ` : ''}
@@ -385,11 +523,22 @@ class PolyglotPanel extends HTMLElement {
     on('#remove-lang', () => { this._confirmRemove = true; this._render(); });
     on('#remove-no', () => { this._confirmRemove = false; this._render(); });
     on('#remove-yes', () => this._removeLanguage().catch(fail));
-    this.shadowRoot.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { this._type = b.dataset.type; this._render(); }; });
+    this.shadowRoot.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { this._type = b.dataset.type; this._notice = null; this._pasting = false; this._render(); }; });
     const search = $('#search');
     if (search) {
       search.oninput = (ev) => { this._search = ev.target.value; clearTimeout(this._t); this._t = setTimeout(() => { this._render(); const s = $('#search'); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }, 250); };
     }
+    const aiSel = $('#ai-entity');
+    if (aiSel) aiSel.onchange = (ev) => this._setAiEntity(ev.target.value).catch(fail);
+    on('#ai-run', () => { this._notice = null; this._translateWithAi().catch(fail); });
+    on('#ai-copy', () => { this._notice = null; this._copyForAi().catch(fail); });
+    on('#ai-paste', () => { this._pasting = true; this._notice = null; this._render(); const b = $('#paste-box'); if (b) b.focus(); });
+    on('#paste-cancel', () => { this._pasting = false; this._manualCopy = null; this._render(); });
+    on('#paste-apply', () => { try { this._applyPastedReply($('#paste-box').value); } catch (e) { fail(e); } });
+    on('#drafts-save', () => this._saveDrafts().catch(fail));
+    on('#drafts-discard', () => { this._drafts = {}; this._notice = null; this._render(); });
+    const mc = $('#manual-copy');
+    if (mc) mc.onfocus = () => mc.select();
     const used = $('#used');
     if (used) used.onchange = (ev) => { this._onlyUsed = ev.target.checked; this._render(); };
     this.shadowRoot.querySelectorAll('input[data-key]').forEach((input) => {
@@ -398,6 +547,8 @@ class PolyglotPanel extends HTMLElement {
         if (input.value.trim() === before) return;
         try {
           await this._save(input.dataset.key, input.value);
+          if (this._drafts) delete this._drafts[input.dataset.key];
+          input.classList.remove('draft');
           input.classList.add('saved');
         } catch (e) { this._error = e.message; this._render(); }
       };

@@ -183,6 +183,60 @@ export function untranslateConfig(config, dict) {
 }
 
 /**
+ * Prompt for translating editor rows with any AI (Home Assistant's AI Task, or pasted into a chat by hand).
+ * items: [{ key, text, about }]. The reply is a JSON object mapping each key to its translation.
+ */
+export function buildTranslationPrompt({ from, to, fromName, toName, items }) {
+  const name = (n, code) => (n && n !== code ? `${n} (${code})` : code);
+  return [
+    `Translate names shown in a Home Assistant smart-home app from ${name(fromName, from)} to ${name(toName, to)}.`,
+    '',
+    'Rules:',
+    '- Short, natural labels, the way a native speaker would expect them on a home dashboard. Not word for word.',
+    '- Keep brand, model and product names, codes, numbers and units unchanged (for example "PAX Calima", "X40 Ultra", "PM2.5").',
+    '- Many entity names are shown after their device name ("Breezer" + "Air mode"): translate only the given part, so that both read well together.',
+    "- Use the target language's usual capitalization for labels.",
+    '- "about" says what the text is and where it appears. Use it to choose the right meaning; do not translate it.',
+    '',
+    'Reply with only a JSON object that maps every "key" below to its translation. No comments, no code fences.',
+    '',
+    JSON.stringify(items.map(({ key, text, about }) => (about ? { key, text, about } : { key, text })), null, 1),
+  ].join('\n');
+}
+
+/**
+ * Reads an AI reply: a JSON object of key → translation, possibly wrapped in prose or code fences, or in the
+ * Export format ({ translations: { lang: {...} } }). Only keys in `validKeys` with non-empty text are returned.
+ */
+export function parseTranslationReply(text, validKeys, language) {
+  if (text && typeof text === 'object') return pickValid(text, validKeys, language);
+  const s = String(text || '').replace(/```(?:json)?/gi, '');
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('No JSON object found in the reply.');
+  let data;
+  try {
+    data = JSON.parse(s.slice(start, end + 1));
+  } catch (e) {
+    throw new Error(`The reply is not valid JSON: ${e.message}`);
+  }
+  return pickValid(data, validKeys, language);
+}
+
+function pickValid(data, validKeys, language) {
+  let map = data;
+  if (map && map.translations && typeof map.translations === 'object') {
+    map = language && map.translations[language] ? map.translations[language] : map.translations;
+  }
+  if (Array.isArray(map)) map = Object.fromEntries(map.filter((x) => x && x.key).map((x) => [x.key, x.translation ?? x.text]));
+  const out = {};
+  for (const [k, v] of Object.entries(map || {})) {
+    if (validKeys.has(k) && typeof v === 'string' && v.trim()) out[k] = v.trim();
+  }
+  return out;
+}
+
+/**
  * Collects the visible strings and entity IDs of a dashboard config, for the editor. Strings longer than 200
  * characters or containing templates are skipped: exact-match translation cannot handle them.
  */
