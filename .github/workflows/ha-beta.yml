@@ -1,0 +1,41 @@
+name: Home Assistant beta
+
+# Polyglot relies on frontend internals, so check it against what is coming: the current beta (in a browser) and
+# Home Assistant's development branch (the Python tests, through the latest pytest-homeassistant-custom-component).
+on:
+  schedule:
+    - cron: "0 6 1,15 * *" # twice a month: betas start on the last Wednesday of the month
+  workflow_dispatch:
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm i --no-save playwright@1.55.0 && npx playwright install --with-deps chromium
+      - run: node tools/ha-matrix.cjs up ${{ matrix.version }} 8123
+      - run: node tools/beta-check.mjs ${{ matrix.version }}
+      - if: failure()
+        run: docker logs hapg-${{ matrix.version }} 2>&1 | tail -100
+
+  python-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install the latest test package and its frontend
+        run: |
+          pip install pytest-homeassistant-custom-component
+          HA=$(python -c 'import homeassistant, os; print(os.path.dirname(homeassistant.__file__))')
+          pip install "$(grep -i '^home-assistant-frontend' "$HA/package_constraints.txt")"
+          python -c 'from homeassistant.const import __version__; print("Home Assistant", __version__)'
+      - run: pytest

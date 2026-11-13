@@ -7,6 +7,15 @@ Home Assistant translates its own interface per user, but the names you type you
 titles) exist in one language only. Polyglot adds a translation layer on top, without renaming anything: your
 automations, history and entity IDs stay exactly as they are.
 
+The same dashboard for a user with English and one with Russian in their profile:
+
+![Dashboard in English](docs/dashboard-en.png)
+![The same dashboard in Russian](docs/dashboard-ru.png)
+
+The Translations page, where an admin fills in the names:
+
+![Translations page](docs/editor.png)
+
 ## How it works
 
 - **Translations page** (admin only, sidebar → Translations). One row per area, floor, device, entity and dashboard
