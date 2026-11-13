@@ -1,2 +1,4 @@
 pytest-homeassistant-custom-component==0.13.375
-ruff==0.14.4
+# The frontend package matching that Home Assistant version (its package_constraints.txt); panel_custom needs it.
+home-assistant-frontend==20260930.5
+ruff==0.17.5
