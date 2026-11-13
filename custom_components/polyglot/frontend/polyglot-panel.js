@@ -16,6 +16,9 @@ const TYPES = [
 
 const LANG_RE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
 
+// "1 row", "2 rows".
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 class PolyglotPanel extends HTMLElement {
@@ -267,6 +270,43 @@ class PolyglotPanel extends HTMLElement {
     this._render();
   }
 
+  // Updates the missing count, the translated counter and the AI buttons from the fields as they are now.
+  _updateCounts() {
+    const sr = this.shadowRoot;
+    const inputs = [...sr.querySelectorAll('input[data-key]')];
+    const orphan = (i) => i.closest('.row') && i.closest('.row').classList.contains('orphan');
+    const live = inputs.filter((i) => !orphan(i));
+    const missing = live.filter((i) => !i.value.trim()).length;
+    const done = live.length - missing;
+    const strong = sr.querySelector('.ai strong');
+    if (strong) strong.textContent = `${missing} missing`;
+    const counter = sr.querySelector('#done-count');
+    if (counter) counter.textContent = `${done} / ${inputs.length} translated`;
+    const run = sr.querySelector('#ai-run');
+    if (run && !this._aiBusy) run.disabled = !missing;
+    const copy = sr.querySelector('#ai-copy');
+    if (copy) copy.disabled = !missing;
+  }
+
+  // Saves fields edited but not yet committed (still focused), so the AI buttons work on what the page shows.
+  async _commitPending() {
+    const dict = (this._config.translations[this._language] ||= {});
+    const drafts = this._drafts || {};
+    const values = {};
+    for (const i of this.shadowRoot.querySelectorAll('input[data-key]')) {
+      const key = i.dataset.key;
+      const v = i.value.trim();
+      if (drafts[key] && v === drafts[key]) continue; // an untouched suggestion is not an edit
+      if (v !== (dict[key] || '')) values[key] = v || null;
+    }
+    if (!Object.keys(values).length) return;
+    await this._ws({ type: 'polyglot/set_many', language: this._language, values });
+    for (const [k, v] of Object.entries(values)) {
+      if (v) dict[k] = v; else delete dict[k];
+      delete drafts[k];
+    }
+  }
+
   // Rows of the current tab that have neither a translation nor a pending suggestion.
   _missingRows() {
     const dict = this._config.translations[this._language] || {};
@@ -331,7 +371,7 @@ class PolyglotPanel extends HTMLElement {
     const text = this._promptFor(rows);
     try {
       await navigator.clipboard.writeText(text);
-      this._notice = `Copied ${rows.length} rows. Paste them into any AI chat, then paste its reply here.`;
+      this._notice = `Copied ${count(rows.length, 'row', 'rows')}. Paste them into any AI chat, then paste its reply here.`;
     } catch (e) {
       this._manualCopy = text; // clipboard blocked: show the text to copy by hand
     }
@@ -347,7 +387,7 @@ class PolyglotPanel extends HTMLElement {
     this._addDrafts(found);
     this._pasting = false;
     this._manualCopy = null;
-    this._notice = `${n} suggestions added. Review them, then Save all.`;
+    this._notice = `${count(n, 'suggestion', 'suggestions')} added. Review, then Save all.`;
     this._render();
   }
 
@@ -357,7 +397,7 @@ class PolyglotPanel extends HTMLElement {
     const dict = (this._config.translations[this._language] ||= {});
     Object.assign(dict, values);
     this._drafts = {};
-    this._notice = `Saved ${Object.keys(values).length} translations.`;
+    this._notice = `Saved ${count(Object.keys(values).length, 'translation', 'translations')}.`;
     this._render();
   }
 
@@ -476,7 +516,7 @@ class PolyglotPanel extends HTMLElement {
             <div class="bar">
               <input type="search" id="search" placeholder="Search" value="${esc(this._search)}">
               ${showToggle ? `<label class="muted"><input type="checkbox" id="used" ${this._onlyUsed ? 'checked' : ''}> Only likely visible</label>` : ''}
-              <span class="muted">${done} / ${rows.length} translated</span>
+              <span class="muted" id="done-count">${done} / ${rows.length} translated</span>
             </div>
             <div class="card ai">
               <div class="bar">
@@ -491,7 +531,7 @@ class PolyglotPanel extends HTMLElement {
     ? 'Sends the missing names on this tab, with a short description of each, to the chosen AI. Suggestions are shown for review and saved only when you choose.'
     : 'Set up an AI Task in Home Assistant to translate here in one click, or copy the missing names into any AI chat and paste the reply back.'}</div>
               ${this._notice ? `<div class="notice">${esc(this._notice)}</div>` : ''}
-              ${draftCount ? `<div class="bar" style="margin-top:8px"><span>${draftCount} suggestions to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button></div>` : ''}
+              ${draftCount ? `<div class="bar" style="margin-top:8px"><span>${count(draftCount, 'suggestion', 'suggestions')} to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button></div>` : ''}
               ${this._pasting ? `
                 ${this._manualCopy ? `<div class="muted">Copying was blocked. Select this text, copy it into an AI chat:</div><textarea readonly id="manual-copy">${esc(this._manualCopy)}</textarea>` : ''}
                 <textarea id="paste-box" placeholder="Paste the AI's reply here (the JSON with translations)"></textarea>
@@ -535,8 +575,8 @@ class PolyglotPanel extends HTMLElement {
     }
     const aiSel = $('#ai-entity');
     if (aiSel) aiSel.onchange = (ev) => this._setAiEntity(ev.target.value).catch(fail);
-    on('#ai-run', () => { this._notice = null; this._translateWithAi().catch(fail); });
-    on('#ai-copy', () => { this._notice = null; this._copyForAi().catch(fail); });
+    on('#ai-run', () => { this._notice = null; this._commitPending().then(() => this._translateWithAi()).catch(fail); });
+    on('#ai-copy', () => { this._notice = null; this._commitPending().then(() => this._copyForAi()).catch(fail); });
     on('#ai-paste', () => { this._pasting = true; this._notice = null; this._render(); const b = $('#paste-box'); if (b) b.focus(); });
     on('#paste-cancel', () => { this._pasting = false; this._manualCopy = null; this._render(); });
     on('#paste-apply', () => { try { this._applyPastedReply($('#paste-box').value); } catch (e) { fail(e); } });
@@ -553,14 +593,13 @@ class PolyglotPanel extends HTMLElement {
         try {
           await this._save(input.dataset.key, input.value);
           if (this._drafts) delete this._drafts[input.dataset.key];
-          // Redraw so the missing count and the AI buttons follow (a cleared field is missing again).
-          const key = input.dataset.key;
-          this._render();
-          const again = this.shadowRoot.querySelector(`input[data-key="${CSS.escape(key)}"]`);
-          if (again && again.value.trim()) again.classList.add('saved');
+          input.classList.remove('draft');
+          input.classList.toggle('saved', Boolean(input.value.trim()));
+          this._updateCounts();
         } catch (e) { this._error = e.message; this._render(); }
       };
       input.onchange = commit;
+      input.oninput = () => this._updateCounts();
       input.onkeydown = (ev) => { if (ev.key === 'Enter') input.blur(); };
     });
     for (const [key, value] of Object.entries(typing)) {
