@@ -73,4 +73,3 @@ def _frontend_hash() -> str:
     for path in sorted(FRONTEND_DIR.glob("*.js")):
         digest.update(path.read_bytes())
     return digest.hexdigest()[:10]
-

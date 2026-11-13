@@ -96,16 +96,61 @@ class PolyglotPanel extends HTMLElement {
   }
 
   // State values HA itself translates for the target language: those rows are hidden. Loaded per language.
+  // Also keeps HA's entity names in the target and the original language, for _haNames.
   async _loadHaTranslations() {
     const lang = this._language;
     this._haKeys = new Set();
+    this._haNamesTo = {};
+    this._haNamesFrom = {};
     if (!lang) return;
-    for (const category of ['entity', 'entity_component']) {
+    const names = async (language, into, states) => {
+      for (const category of ['entity', 'entity_component']) {
+        try {
+          const { resources } = await this._ws({ type: 'frontend/get_translations', language, category });
+          for (const [k, v] of Object.entries(resources || {})) {
+            if (states && k.includes('.state.')) this._haKeys.add(k);
+            else if (k.endsWith('.name')) into[k] = v;
+          }
+        } catch (e) { /* older core: show everything */ }
+      }
+    };
+    await names(lang, this._haNamesTo, true);
+    await names(this._config.primary, this._haNamesFrom, false);
+    if (!this._registry) {
       try {
-        const { resources } = await this._ws({ type: 'frontend/get_translations', language: lang, category });
-        for (const k of Object.keys(resources || {})) if (k.includes('.state.')) this._haKeys.add(k);
-      } catch (e) { /* older core: show everything */ }
+        const list = await this._ws({ type: 'config/entity_registry/list' });
+        this._registry = new Map(list.map((e) => [e.entity_id, e]));
+      } catch (e) { this._registry = new Map(); }
     }
+  }
+
+  // Names Home Assistant itself translates: entities named by their integration (translation_key) or by their
+  // device class, not renamed by the user, whose original-language name is exactly the row's text (so names that
+  // an integration composes or that carry placeholders are left to the AI). key → translation.
+  _haNames(rows) {
+    const out = {};
+    for (const r of rows) {
+      if (!r.key.startsWith('entity:')) continue;
+      const id = r.key.slice(7);
+      const e = this._registry && this._registry.get(id);
+      const s = this._hass.states[id];
+      if (!e || !s || e.name) continue;
+      const domain = id.split('.')[0];
+      let k = null;
+      if (e.translation_key) k = `component.${e.platform}.entity.${domain}.${e.translation_key}.name`;
+      else if (!e.original_name && s.attributes.device_class) k = `component.${domain}.entity_component.${s.attributes.device_class}.name`;
+      const to = k && this._haNamesTo[k];
+      // to === original: the integration has no real translation for this language, only the fallback.
+      if (to && !to.includes('{') && to !== r.original && this._haNamesFrom[k] === r.original) out[r.key] = to;
+    }
+    return out;
+  }
+
+  // Fills missing rows from Home Assistant's own translations. Returns how many.
+  _fillFromHa() {
+    const found = this._haNames(this._missingRows());
+    this._addDrafts(found);
+    return Object.keys(found).length;
   }
 
   // True when HA has its own translation of this state value in the target language.
@@ -428,8 +473,11 @@ class PolyglotPanel extends HTMLElement {
 
   async _translateWithAi() {
     const entity_id = this._aiEntity || this._userSettings.ai_task_entity || this._aiTasks()[0];
+    // Home Assistant's own translations first: exact, free, and nothing to send.
+    const fromHa = this._fillFromHa();
+    if (fromHa) this._notice = `${count(fromHa, 'name', 'names')} taken from Home Assistant's own translations.`;
     const rows = this._missingRows();
-    if (!entity_id || !rows.length) return;
+    if (!entity_id || !rows.length) { this._render(); return; }
     const units = this._unitsFor(rows);
     const queue = packBatches(units, 30);
     const PARALLEL = 3;
@@ -497,15 +545,16 @@ class PolyglotPanel extends HTMLElement {
   }
 
   async _copyForAi() {
+    const fromHa = this._fillFromHa();
     const rows = this._missingRows();
-    if (!rows.length) return;
+    if (!rows.length) { this._render(); return; }
     const units = this._unitsFor(rows);
     // The reply refers to the numbers in this prompt; kept until the reply is pasted.
     this._copied = units;
     const text = this._promptFor(units);
     try {
       await navigator.clipboard.writeText(text);
-      this._notice = `Copied ${count(units.length, 'name', 'names')}. Paste them into any AI chat, then paste its reply here.`;
+      this._notice = `${fromHa ? `${count(fromHa, 'name', 'names')} taken from Home Assistant's own translations. ` : ''}Copied ${count(units.length, 'name', 'names')}. Paste them into any AI chat, then paste its reply here.`;
     } catch (e) {
       this._manualCopy = text; // clipboard blocked: show the text to copy by hand
     }
@@ -584,7 +633,9 @@ class PolyglotPanel extends HTMLElement {
     const flagCount = Object.keys(flags).length;
     if (!flagCount) this._flaggedOnly = false;
     const rows = this._flaggedOnly ? allRows.filter((r) => flags[r.key]) : allRows;
-    const missing = c && lang ? allRows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]).length : 0;
+    const missingRows = c && lang ? allRows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]) : [];
+    const missing = missingRows.length;
+    const haCount = this._type === 'entity' ? Object.keys(this._haNames(missingRows)).length : 0;
     const aiTasks = this._hass ? this._aiTasks() : [];
     const aiEntity = this._aiEntity || (this._userSettings && this._userSettings.ai_task_entity) || aiTasks[0];
     const done = allRows.filter((r) => dict[r.key]).length;
@@ -673,6 +724,7 @@ class PolyglotPanel extends HTMLElement {
             <div class="card ai">
               <div class="bar">
                 <strong>${missing} missing</strong>
+                ${haCount ? `<button id="ha-fill" title="Names Home Assistant already translates for this language">Use Home Assistant's names (${haCount})</button>` : ''}
                 ${aiTasks.length ? `
                   <select id="ai-entity" title="AI used for translating">${aiTasks.map((id) => `<option value="${esc(id)}" ${id === aiEntity ? 'selected' : ''}>${esc((this._hass.states[id].attributes.friendly_name) || id)}</option>`).join('')}</select>
                   <button id="ai-run" ${!missing || this._aiBusy ? 'disabled' : ''}>${this._aiBusy ? `Translating ${this._aiBusy.done} / ${this._aiBusy.total}…` : 'Translate missing with AI'}</button>` : ''}
@@ -730,6 +782,11 @@ class PolyglotPanel extends HTMLElement {
     if (aiSel) aiSel.onchange = (ev) => this._setAiEntity(ev.target.value).catch(fail);
     on('#ai-run', () => { this._notice = null; this._commitPending().then(() => this._translateWithAi()).catch(fail); });
     on('#ai-copy', () => { this._notice = null; this._commitPending().then(() => this._copyForAi()).catch(fail); });
+    on('#ha-fill', () => {
+      const n = this._fillFromHa();
+      this._notice = `${count(n, 'name', 'names')} taken from Home Assistant's own translations. Review, then Save all.`;
+      this._render();
+    });
     on('#ai-paste', () => { this._pasting = true; this._notice = null; this._render(); const b = $('#paste-box'); if (b) b.focus(); });
     on('#paste-cancel', () => { this._pasting = false; this._manualCopy = null; this._render(); });
     on('#paste-apply', () => { try { this._applyPastedReply($('#paste-box').value); } catch (e) { fail(e); } });

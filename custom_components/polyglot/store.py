@@ -27,9 +27,7 @@ class PolyglotStore:
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
         self.languages = list(data.get("languages", []))
-        self.translations = {
-            lang: dict(values) for lang, values in data.get("translations", {}).items()
-        }
+        self.translations = {lang: dict(values) for lang, values in data.get("translations", {}).items()}
 
     @property
     def primary(self) -> str:

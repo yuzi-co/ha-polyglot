@@ -11,6 +11,10 @@ automations, history and entity IDs stay exactly as they are.
 
 - **Translations page** (admin only, sidebar → Translations). One row per area, floor, device, entity and dashboard
   string, one input per row. Pick a language, type, press Enter. Export and import as JSON.
+- **Use Home Assistant's names**: many entities are named by their integration, and Home Assistant already has
+  those names in other languages; it just shows entity names in the system language. The Entities tab fills those
+  in for you (as suggestions to review). It is also the first step of the AI and copy buttons, so the AI only gets
+  the rest.
 - **Translate missing with AI**: sends the untranslated names on the current tab to an AI Task set up in Home
   Assistant (Claude, OpenAI, Ollama or any other). Names go grouped by device, room or dashboard view, each
   repeated name once, with a short description: entity type, unit, range, options and numeric values. Text states
@@ -83,8 +87,13 @@ update, or a template preview).
 ## Development
 
 ```
-npm test        # node --test tests/
+npm test                                # frontend logic, node --test
+pip install -r requirements_test.txt    # Python 3.14
+pytest                                  # integration: setup, storage, WebSocket API
+ruff check . && ruff format --check .
 ```
+
+CI runs all of these plus hassfest and the HACS check on every push.
 
 The frontend is plain ES modules served straight from `custom_components/polyglot/frontend`, no build step.
 `core.js` holds the pure translation logic and is what the tests cover.

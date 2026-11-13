@@ -26,8 +26,8 @@ def bubble_mask(size, box, radius, tail):
 
 
 def glyph(draw, center, text, font, fill):
-    l, t, r, b = draw.textbbox((0, 0), text, font=font)
-    draw.text((center[0] - (l + r) / 2, center[1] - (t + b) / 2), text, font=font, fill=fill)
+    left, t, r, b = draw.textbbox((0, 0), text, font=font)
+    draw.text((center[0] - (left + r) / 2, center[1] - (t + b) / 2), text, font=font, fill=fill)
 
 
 def icon(px):
@@ -43,8 +43,12 @@ def icon(px):
     front = bubble_mask(size, front_box, 30 * u, front_tail)
 
     # Gap between the bubbles: cut the front shape, grown by a few units, out of the back bubble.
-    gap = bubble_mask(size, (front_box[0] - 10 * u, front_box[1] - 10 * u, front_box[2] + 10 * u, front_box[3] + 10 * u),
-                      40 * u, front_tail)
+    gap = bubble_mask(
+        size,
+        (front_box[0] - 10 * u, front_box[1] - 10 * u, front_box[2] + 10 * u, front_box[3] + 10 * u),
+        40 * u,
+        front_tail,
+    )
     back = ImageChops.subtract(back, gap)
 
     img.paste(Image.new("RGBA", size, BLUE), (0, 0), back)
@@ -61,12 +65,12 @@ def logo(height, text_color):
     ic = icon(height)
     font = ImageFont.truetype(str(FONTS / "segoeuib.ttf"), int(height * 0.5 * SS))
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    l, t, r, b = probe.textbbox((0, 0), "Polyglot", font=font)
+    left, t, r, b = probe.textbbox((0, 0), "Polyglot", font=font)
     gap = int(height * 0.18)
-    width = height + gap + (r - l) // SS + gap // 2
+    width = height + gap + (r - left) // SS + gap // 2
     text = Image.new("RGBA", (width * SS, height * SS), (0, 0, 0, 0))
     td = ImageDraw.Draw(text)
-    td.text(((height + gap) * SS - l, (height * SS - (t + b)) / 2), "Polyglot", font=font, fill=text_color)
+    td.text(((height + gap) * SS - left, (height * SS - (t + b)) / 2), "Polyglot", font=font, fill=text_color)
     out = text.resize((width, height), Image.LANCZOS)
     out.alpha_composite(ic, (0, 0))
     return out
