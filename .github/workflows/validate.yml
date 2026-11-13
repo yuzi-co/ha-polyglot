@@ -15,10 +15,10 @@ jobs:
       - uses: home-assistant/actions/hassfest@master
 
   hacs:
+    # The HACS action only validates public repositories.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: hacs/action@main
         with:
           category: integration
-          # Until the repository is public and in the brands repo; remove these then.
-          ignore: brands
