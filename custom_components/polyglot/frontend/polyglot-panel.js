@@ -398,7 +398,12 @@ class PolyglotPanel extends HTMLElement {
     const aiEntity = this._aiEntity || (this._userSettings && this._userSettings.ai_task_entity) || aiTasks[0];
     const done = rows.filter((r) => dict[r.key]).length;
     const showToggle = ['device', 'entity', 'state'].includes(this._type);
-    const focusedKey = this.shadowRoot.activeElement && this.shadowRoot.activeElement.dataset ? this.shadowRoot.activeElement.dataset.key : null;
+    // Keep focus, caret and any unsaved typing across a redraw (it rebuilds every field).
+    const active = this.shadowRoot.activeElement;
+    const focusedKey = active && active.dataset ? active.dataset.key : null;
+    const caret = focusedKey ? [active.selectionStart, active.selectionEnd] : null;
+    const typing = {};
+    this.shadowRoot.querySelectorAll('input[data-key]').forEach((i) => { if (i.value !== i.defaultValue) typing[i.dataset.key] = i.value; });
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -548,16 +553,26 @@ class PolyglotPanel extends HTMLElement {
         try {
           await this._save(input.dataset.key, input.value);
           if (this._drafts) delete this._drafts[input.dataset.key];
-          input.classList.remove('draft');
-          input.classList.add('saved');
+          // Redraw so the missing count and the AI buttons follow (a cleared field is missing again).
+          const key = input.dataset.key;
+          this._render();
+          const again = this.shadowRoot.querySelector(`input[data-key="${CSS.escape(key)}"]`);
+          if (again && again.value.trim()) again.classList.add('saved');
         } catch (e) { this._error = e.message; this._render(); }
       };
       input.onchange = commit;
       input.onkeydown = (ev) => { if (ev.key === 'Enter') input.blur(); };
     });
+    for (const [key, value] of Object.entries(typing)) {
+      const f = this.shadowRoot.querySelector(`input[data-key="${CSS.escape(key)}"]`);
+      if (f) f.value = value;
+    }
     if (focusedKey) {
       const f = this.shadowRoot.querySelector(`input[data-key="${CSS.escape(focusedKey)}"]`);
-      if (f) f.focus();
+      if (f) {
+        f.focus();
+        if (caret && caret[0] !== null) try { f.setSelectionRange(caret[0], caret[1]); } catch (e) { /* not a text field */ }
+      }
     }
   }
 }
