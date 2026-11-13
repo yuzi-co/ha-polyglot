@@ -1,7 +1,10 @@
 // Polyglot editor: the admin-only "Translations" panel. Plain custom element, no build step.
 // Lists areas, floors, devices, entities and dashboard text with one input per row for the chosen language.
 // core.js gets this module's ?v= query too, so a new release never runs against a cached old core.
-const { buildTranslationPrompt, collectConfig, isDevicePrefixed, parseTranslationReply, pickGlossary } = await import(
+const {
+  buildTranslationPrompt, collectConfig, dedupeRows, isDevicePrefixed, packBatches, parseAiReply, parseTranslationReply,
+  pickGlossary, placeOf, reviewSuggestions, roleOf,
+} = await import(
   new URL(`./core.js${new URL(import.meta.url).search}`, import.meta.url).href
 );
 
@@ -14,7 +17,13 @@ const TYPES = [
   ['state', 'State values'],
 ];
 
-const LANG_RE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+// What an entity of each domain is, in plain words: tells the AI a reading from an action ("Distance reset").
+const KIND = {
+  sensor: 'a reading', binary_sensor: 'an on/off reading', button: 'an action button', switch: 'an on/off switch',
+  select: 'a choice', number: 'a setting', input_number: 'a setting', input_select: 'a choice', input_boolean: 'an on/off switch',
+};
+
+const LANG_RE =/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
 
 // "1 row", "2 rows".
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -35,6 +44,8 @@ class PolyglotPanel extends HTMLElement {
     this._error = null;
     this._userSettings = {};
     this._drafts = {};
+    this._unsure = new Set(); // suggestion keys the AI marked as unsure
+    this._flaggedOnly = false;
     // HA may create this element and set its properties before the module finished loading (it awaits core.js).
     // Those values landed as plain own properties that hide the setters below: re-apply them through the setters.
     for (const prop of ['narrow', 'panel', 'route', 'hass']) {
@@ -114,18 +125,24 @@ class PolyglotPanel extends HTMLElement {
   async _scanDashboards() {
     const strings = new Set();
     const entityIds = new Set();
+    const contexts = new Map();
     const dashboards = await this._ws({ type: 'lovelace/dashboards/list' });
-    const paths = [null, ...dashboards.filter((d) => d.mode === 'storage').map((d) => d.url_path)];
-    for (const url_path of paths) {
+    const list = [{ url_path: null, title: 'Overview' }, ...dashboards.filter((d) => d.mode === 'storage')];
+    for (const { url_path, title } of list) {
       try {
         const cfg = await this._ws({ type: 'lovelace/config', url_path, force: false });
-        const found = collectConfig(cfg);
+        const found = collectConfig(cfg, title);
         found.strings.forEach((s) => strings.add(s));
         found.entityIds.forEach((s) => entityIds.add(s));
+        for (const [s, at] of found.contexts) contexts.set(s, [...(contexts.get(s) || []), ...at].slice(0, 3));
       } catch (e) { /* auto-generated or YAML dashboard without config */ }
     }
-    for (const d of dashboards) if (d.title) strings.add(d.title);
-    return { strings, entityIds };
+    for (const d of dashboards) {
+      if (!d.title) continue;
+      strings.add(d.title);
+      if (!contexts.has(d.title)) contexts.set(d.title, [{ key: 'title in the sidebar' }]);
+    }
+    return { strings, entityIds, contexts };
   }
 
   // Rows for the current type: { key, original, context }.
@@ -158,7 +175,8 @@ class PolyglotPanel extends HTMLElement {
         .filter((d) => !this._onlyUsed || usedDevices.has(d.id))
         .map((d) => ({
           key: `device:${d.id}`, original: d.name_by_user || d.name, context: [areaName(d.area_id), d.model].filter(Boolean).join(' · '),
-          about: ['device name', d.area_id && `in ${areaName(d.area_id)}`, [d.manufacturer, d.model].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+          about: ['device name', [d.manufacturer, d.model].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+          group: d.area_id || null, groupLabel: d.area_id ? `room "${areaName(d.area_id)}"` : undefined,
         }));
     } else if (this._type === 'entity') {
       rows = Object.keys(h.states)
@@ -173,27 +191,41 @@ class PolyglotPanel extends HTMLElement {
           const device = e && e.device_id && h.devices[e.device_id];
           const ctx = [id, prefixed && device ? `after device: ${device.name_by_user || device.name}` : ''].filter(Boolean).join(' · ');
           const domain = id.split('.')[0];
-          const dc = s.attributes.device_class;
-          const unit = s.attributes.unit_of_measurement;
-          const now = ['unknown', 'unavailable', ''].includes(s.state) || s.state.length > 40 ? '' : `now ${s.state}${unit ? ` ${unit}` : ''}`;
           const a = s.attributes;
+          const dc = a.device_class;
+          const unit = a.unit_of_measurement;
+          // Only numbers are sent as the current value: text states can be personal (addresses, names, events).
+          const now = /^-?\d+(\.\d+)?$/.test(s.state) ? `now ${s.state}${unit ? ` ${unit}` : ''}` : '';
           const range = a.min !== undefined && a.max !== undefined ? `range ${a.min} to ${a.max}` : '';
           const options = Array.isArray(a.options) && a.options.length ? `options: ${a.options.slice(0, 6).join(', ')}` : '';
-          const model = device && [device.manufacturer, device.model].filter(Boolean).join(' ');
           const about = [
-            prefixed && device ? `entity name, shown after device name "${device.name_by_user || device.name}"` : 'entity name',
-            device && model ? `device: ${model}` : '',
-            `a ${domain}${dc ? ` (${dc})` : ''}`,
-            unit && `unit ${unit}`,
+            `${domain}${dc ? ` (${dc})` : ''}${KIND[domain] ? `, ${KIND[domain]}` : ''}`,
+            unit && !now ? `unit ${unit}` : '',
             range,
             options,
             now,
+            device && !prefixed ? 'full name' : '',
           ].filter(Boolean).join(', ');
-          return { key: `entity:${id}`, original, context: ctx, about };
+          const model = device && [device.manufacturer, device.model].filter(Boolean).join(' ');
+          const deviceName = device && (device.name_by_user || device.name);
+          return {
+            key: `entity:${id}`, original, context: ctx, about,
+            group: device ? device.id : null,
+            groupLabel: device ? `device "${deviceName}"${model && model !== deviceName ? ` (${model})` : ''}` : undefined,
+          };
         })
         .filter(Boolean);
     } else if (this._type === 'text') {
-      rows = [...(this._dash ? this._dash.strings : [])].map((s) => ({ key: `text:${s}`, original: s, context: '', about: 'dashboard title, heading or card label' }));
+      const contexts = (this._dash && this._dash.contexts) || new Map();
+      rows = [...(this._dash ? this._dash.strings : [])].map((s) => {
+        const at = contexts.get(s) || [];
+        const place = at.length ? placeOf(at[0]) : '';
+        return {
+          key: `text:${s}`, original: s, context: place,
+          about: at.length ? [...new Set(at.map(roleOf))].join('; ') : 'dashboard text',
+          group: place || null, groupLabel: place || undefined,
+        };
+      });
     } else if (this._type === 'state') {
       // Text states and selectable options the way this page shows them, minus the ones HA already translates
       // into the target language (the target user never sees those in English). Dates and times are skipped.
@@ -283,6 +315,7 @@ class PolyglotPanel extends HTMLElement {
 
   // Updates the missing count, the translated counter and the AI buttons from the fields as they are now.
   _updateCounts() {
+    if (this._flaggedOnly) return; // the page shows a subset; the counts from the last redraw stay right enough
     const sr = this.shadowRoot;
     const inputs = [...sr.querySelectorAll('input[data-key]')];
     const orphan = (i) => i.closest('.row') && i.closest('.row').classList.contains('orphan');
@@ -344,9 +377,13 @@ class PolyglotPanel extends HTMLElement {
     return undefined;
   }
 
-  _promptFor(rows) {
+  // Translation units for rows (see dedupeRows): each distinct text once, with its group.
+  _unitsFor(rows) {
+    return dedupeRows(rows.map((r) => ({ key: r.key, text: r.original, about: r.about, group: r.group, groupLabel: r.groupLabel })));
+  }
+
+  _promptFor(items) {
     const names = (code) => { try { return new Intl.DisplayNames(['en'], { type: 'language' }).of(code); } catch (e) { return code; } };
-    const items = rows.map((r) => ({ key: r.key, text: r.original, about: r.about }));
     // Saved translations first, then this run's suggestions, so later batches follow earlier ones.
     const dict = this._config.translations[this._language] || {};
     const drafts = this._draftsFor === this._language ? this._drafts || {} : {};
@@ -367,47 +404,87 @@ class PolyglotPanel extends HTMLElement {
     this._draftsFor = this._language;
   }
 
+  // Applies a parsed reply to its units: every key of a unit gets the translation. Returns the units left out.
+  _applyUnits(units, { byId, unsure }) {
+    const values = {};
+    const missing = [];
+    for (const u of units) {
+      const t = byId[u.id];
+      if (!t) { missing.push(u); continue; }
+      for (const key of u.keys) {
+        values[key] = t;
+        if (unsure.has(String(u.id))) this._unsure.add(key);
+      }
+    }
+    this._addDrafts(values);
+    return missing;
+  }
+
+  _clearDrafts() {
+    this._drafts = {};
+    this._unsure = new Set();
+    this._flaggedOnly = false;
+  }
+
   async _translateWithAi() {
     const entity_id = this._aiEntity || this._userSettings.ai_task_entity || this._aiTasks()[0];
     const rows = this._missingRows();
     if (!entity_id || !rows.length) return;
-    const BATCH = 30;
-    this._aiBusy = { done: 0, total: rows.length };
+    const units = this._unitsFor(rows);
+    const queue = packBatches(units, 30);
+    const PARALLEL = 3;
+    this._aiBusy = { done: 0, total: units.length };
     this._error = null;
     this._render();
     let failed = 0;
     let lastError = null;
-    // A batch that fails (for example the model's output limit) is split in half and retried, down to single rows;
-    // what still fails is left missing and reported, the rest of the run goes on.
-    const run = async (batch) => {
+    let worked = false;
+    let stop = null;
+    const progress = (n) => { this._aiBusy = { done: this._aiBusy.done + n, total: units.length }; this._render(); };
+    // retried: units the AI left out of a reply get one more try in a batch of their own.
+    const run = async (batch, retried) => {
+      let reply;
       try {
         const res = await this._ws({
           type: 'call_service', domain: 'ai_task', service: 'generate_data', return_response: true,
           service_data: { task_name: 'Polyglot translation', entity_id, instructions: this._promptFor(batch) },
         });
-        const data = res && res.response ? res.response.data : undefined;
-        this._addDrafts(parseTranslationReply(data, new Set(batch.map((r) => r.key)), this._language));
-        this._aiBusy = { done: this._aiBusy.done + batch.length, total: rows.length };
-        this._render();
+        reply = parseAiReply(res && res.response ? res.response.data : undefined);
       } catch (e) {
-        if (batch.length > 1) {
+        // Too much output for one reply: split the batch. Any other error: stop if nothing has worked yet (the AI
+        // itself is failing), otherwise skip this batch and go on.
+        if (/token|length|limit|too long|truncat/i.test(e.message || '') && batch.length > 1) {
           const half = Math.ceil(batch.length / 2);
-          await run(batch.slice(0, half));
-          await run(batch.slice(half));
+          await run(batch.slice(0, half), retried);
+          await run(batch.slice(half), retried);
           return;
         }
-        // Nothing has worked yet even for a single row: the AI itself is failing, so stop instead of trying every row.
-        if (!this._aiBusy.done) throw e;
-        failed += 1;
+        if (!worked) { stop = e; return; }
+        failed += batch.length;
         lastError = e;
-        this._aiBusy = { done: this._aiBusy.done + 1, total: rows.length };
+        progress(batch.length);
+        return;
       }
+      worked = true;
+      const missing = this._applyUnits(batch, reply);
+      progress(batch.length - missing.length);
+      if (!missing.length) return;
+      if (!retried) { await run(missing, true); return; }
+      failed += missing.length;
+      lastError = new Error('the AI left them out of its reply');
+      progress(missing.length);
+    };
+    // A few batches at a time; the first one alone, so a failing AI stops the run after one call.
+    const worker = async () => {
+      while (queue.length && !stop) await run(queue.shift(), false);
     };
     try {
-      for (let i = 0; i < rows.length; i += BATCH) await run(rows.slice(i, i + BATCH));
+      if (queue.length) await run(queue.shift(), false);
+      if (!stop) await Promise.all(Array.from({ length: PARALLEL }, worker));
+      if (stop) throw stop;
     } finally {
       this._aiBusy = null;
-      if (failed) this._error = `${count(failed, 'row', 'rows')} could not be translated (${(lastError && lastError.message) || lastError}). Try again for those.`;
+      if (failed) this._error = `${count(failed, 'name', 'names')} could not be translated (${(lastError && lastError.message) || lastError}). Run it again for those.`;
       this._render();
     }
   }
@@ -422,10 +499,13 @@ class PolyglotPanel extends HTMLElement {
   async _copyForAi() {
     const rows = this._missingRows();
     if (!rows.length) return;
-    const text = this._promptFor(rows);
+    const units = this._unitsFor(rows);
+    // The reply refers to the numbers in this prompt; kept until the reply is pasted.
+    this._copied = units;
+    const text = this._promptFor(units);
     try {
       await navigator.clipboard.writeText(text);
-      this._notice = `Copied ${count(rows.length, 'row', 'rows')}. Paste them into any AI chat, then paste its reply here.`;
+      this._notice = `Copied ${count(units.length, 'name', 'names')}. Paste them into any AI chat, then paste its reply here.`;
     } catch (e) {
       this._manualCopy = text; // clipboard blocked: show the text to copy by hand
     }
@@ -434,11 +514,23 @@ class PolyglotPanel extends HTMLElement {
   }
 
   _applyPastedReply(text) {
-    const valid = new Set(this._rows().map((r) => r.key));
-    const found = parseTranslationReply(text, valid, this._language);
-    const n = Object.keys(found).length;
-    if (!n) throw new Error('The reply has no translations for rows on this tab.');
-    this._addDrafts(found);
+    const before = Object.keys(this._drafts || {}).length;
+    const reply = parseAiReply(text);
+    if (this._copied && Object.keys(reply.byId).length) {
+      // A reply to "Copy for any AI": numbered.
+      this._applyUnits(this._copied, reply);
+    } else {
+      // Keys, as in an Export file.
+      let found = {};
+      try { found = parseTranslationReply(text, new Set(this._rows().map((r) => r.key)), this._language); } catch (e) { /* none */ }
+      this._addDrafts(found);
+    }
+    const n = Object.keys(this._drafts).length - before;
+    if (!n) {
+      throw new Error(Object.keys(reply.byId).length
+        ? 'This reply is for an earlier copy. Copy again and paste the new reply.'
+        : 'The reply has no translations for rows on this tab.');
+    }
     this._pasting = false;
     this._manualCopy = null;
     this._notice = `${count(n, 'suggestion', 'suggestions')} added. Review, then Save all.`;
@@ -450,7 +542,7 @@ class PolyglotPanel extends HTMLElement {
     await this._ws({ type: 'polyglot/set_many', language: this._language, values });
     const dict = (this._config.translations[this._language] ||= {});
     Object.assign(dict, values);
-    this._drafts = {};
+    this._clearDrafts();
     this._notice = `Saved ${count(Object.keys(values).length, 'translation', 'translations')}.`;
     this._render();
   }
@@ -483,14 +575,19 @@ class PolyglotPanel extends HTMLElement {
     const c = this._config;
     const lang = this._language;
     const dict = (c && lang && c.translations[lang]) || {};
-    if (this._draftsFor !== lang) { this._drafts = {}; this._draftsFor = lang; }
+    if (this._draftsFor !== lang) { this._clearDrafts(); this._draftsFor = lang; }
     const drafts = this._drafts || {};
     const draftCount = Object.keys(drafts).length;
-    const rows = c && lang ? this._rows() : [];
-    const missing = c && lang ? rows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]).length : 0;
+    const allRows = c && lang ? this._rows() : [];
+    // Suggestions worth a second look on this tab, and the filter that shows only them.
+    const flags = draftCount ? reviewSuggestions(allRows, drafts, dict, this._unsure) : {};
+    const flagCount = Object.keys(flags).length;
+    if (!flagCount) this._flaggedOnly = false;
+    const rows = this._flaggedOnly ? allRows.filter((r) => flags[r.key]) : allRows;
+    const missing = c && lang ? allRows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]).length : 0;
     const aiTasks = this._hass ? this._aiTasks() : [];
     const aiEntity = this._aiEntity || (this._userSettings && this._userSettings.ai_task_entity) || aiTasks[0];
-    const done = rows.filter((r) => dict[r.key]).length;
+    const done = allRows.filter((r) => dict[r.key]).length;
     const showToggle = ['device', 'entity', 'state'].includes(this._type);
     // Keep focus, caret and any unsaved typing across a redraw (it rebuilds every field).
     const active = this.shadowRoot.activeElement;
@@ -527,6 +624,7 @@ class PolyglotPanel extends HTMLElement {
         .row input { width: 100%; box-sizing: border-box; }
         .row input.saved { border-color: var(--success-color, #4caf50); }
         .row.orphan .orig { color: var(--warning-color, #ff9800); }
+        .row .flag { display: block; color: var(--warning-color, #ff9800); font-size: 0.8em; }
         .row input.draft { border-color: var(--primary-color); border-style: dashed; font-style: italic; }
         .ai { padding: 10px 12px; margin-bottom: 12px; }
         .ai .bar { margin-bottom: 0; }
@@ -570,7 +668,7 @@ class PolyglotPanel extends HTMLElement {
             <div class="bar">
               <input type="search" id="search" placeholder="Search" value="${esc(this._search)}">
               ${showToggle ? `<label class="muted"><input type="checkbox" id="used" ${this._onlyUsed ? 'checked' : ''}> Only likely visible</label>` : ''}
-              <span class="muted" id="done-count">${done} / ${rows.length} translated</span>
+              <span class="muted" id="done-count">${done} / ${allRows.length} translated</span>
             </div>
             <div class="card ai">
               <div class="bar">
@@ -585,7 +683,8 @@ class PolyglotPanel extends HTMLElement {
     ? 'Sends the missing names on this tab, with a short description of each, to the chosen AI. Suggestions are shown for review and saved only when you choose.'
     : 'Set up an AI Task in Home Assistant to translate here in one click, or copy the missing names into any AI chat and paste the reply back.'}</div>
               ${this._notice ? `<div class="notice">${esc(this._notice)}</div>` : ''}
-              ${draftCount ? `<div class="bar" style="margin-top:8px"><span>${count(draftCount, 'suggestion', 'suggestions')} to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button></div>` : ''}
+              ${draftCount ? `<div class="bar" style="margin-top:8px"><span>${count(draftCount, 'suggestion', 'suggestions')} to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button>
+                ${flagCount ? `<label><input type="checkbox" id="flagged-only" ${this._flaggedOnly ? 'checked' : ''}> Only the ${count(flagCount, 'one', 'ones')} to check here</label>` : ''}</div>` : ''}
               ${this._pasting ? `
                 ${this._manualCopy ? `<div class="muted">Copying was blocked. Select this text, copy it into an AI chat:</div><textarea readonly id="manual-copy">${esc(this._manualCopy)}</textarea>` : ''}
                 <textarea id="paste-box" placeholder="Paste the AI's reply here (the JSON with translations)"></textarea>
@@ -594,7 +693,7 @@ class PolyglotPanel extends HTMLElement {
             <div class="card">
               ${rows.length ? rows.map((r) => `
                 <div class="row${r.orphan ? ' orphan' : ''}">
-                  <div class="orig">${esc(r.original)}${r.context ? `<span class="ctx">${esc(r.context)}</span>` : ''}</div>
+                  <div class="orig">${esc(r.original)}${r.context ? `<span class="ctx">${esc(r.context)}</span>` : ''}${flags[r.key] ? `<span class="flag">Check: ${esc(flags[r.key].join(', '))}</span>` : ''}</div>
                   <input type="text" data-key="${esc(r.key)}" class="${drafts[r.key] && !dict[r.key] ? 'draft' : ''}" value="${esc(dict[r.key] || drafts[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}">
                 </div>`).join('') : '<div class="empty muted">Nothing here.</div>'}
             </div>` : '<div class="empty muted">Add a language to start, for example ru, de or fr.</div>'}
@@ -635,7 +734,9 @@ class PolyglotPanel extends HTMLElement {
     on('#paste-cancel', () => { this._pasting = false; this._manualCopy = null; this._render(); });
     on('#paste-apply', () => { try { this._applyPastedReply($('#paste-box').value); } catch (e) { fail(e); } });
     on('#drafts-save', () => this._saveDrafts().catch(fail));
-    on('#drafts-discard', () => { this._drafts = {}; this._notice = null; this._render(); });
+    on('#drafts-discard', () => { this._clearDrafts(); this._notice = null; this._render(); });
+    const fo = $('#flagged-only');
+    if (fo) fo.onchange = (ev) => { this._flaggedOnly = ev.target.checked; this._render(); };
     const mc = $('#manual-copy');
     if (mc) mc.onfocus = () => mc.select();
     const used = $('#used');

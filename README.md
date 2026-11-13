@@ -11,9 +11,13 @@ automations, history and entity IDs stay exactly as they are.
 
 - **Translations page** (admin only, sidebar → Translations). One row per area, floor, device, entity and dashboard
   string, one input per row. Pick a language, type, press Enter. Export and import as JSON.
-- **Translate missing with AI**: sends the untranslated names on the current tab, each with a short description of
-  what it is, to an AI Task set up in Home Assistant (Claude, OpenAI, Ollama or any other). Suggestions appear
-  dashed for review and are saved only with *Save all* or by editing a field. Names are sent to that AI provider.
+- **Translate missing with AI**: sends the untranslated names on the current tab to an AI Task set up in Home
+  Assistant (Claude, OpenAI, Ollama or any other). Names go grouped by device, room or dashboard view, each
+  repeated name once, with a short description: entity type, unit, range, options and numeric values. Text states
+  are never sent. Your existing translations go along as a glossary, so the AI keeps your terms. Suggestions appear
+  dashed for review and are saved only with *Save all* or by editing a field. Ones worth a second look (the AI was
+  unsure, two different names got the same translation, or it is much longer than the original) are marked, with
+  a filter to show only those.
 - **Copy for any AI / Paste reply**: the same request as text for any AI chat or a human translator; paste the
   JSON reply back to get the same reviewable suggestions.
 - **Overlay** that every page loads. For a user whose profile language has translations, it swaps the names in the
@@ -84,6 +88,14 @@ npm test        # node --test tests/
 
 The frontend is plain ES modules served straight from `custom_components/polyglot/frontend`, no build step.
 `core.js` holds the pure translation logic and is what the tests cover.
+
+To check a change to the AI prompt, run it on a fixed set of hard names (`tools/ai-eval/cases.json`) through a
+real AI Task. It writes a review sheet to `tools/ai-eval/out/` for a native speaker; `--judge` adds a second AI's
+verdict as a rough signal (judges make mistakes too).
+
+```
+HA_URL=https://ha.example HA_TOKEN=... node tools/ai-eval/run.mjs --to ru --entity ai_task.x [--judge ai_task.y]
+```
 
 ## License
 

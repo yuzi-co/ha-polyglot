@@ -1,7 +1,7 @@
 // Run with: node --test tests/
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTranslationPrompt, collectConfig, createTranslator, mapRecord, parseTranslationReply, pickGlossary, pickLanguage, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
+import { buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, reviewSuggestions, roleOf, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
 
 test('pickLanguage', () => {
   assert.equal(pickLanguage('ru', 'en', ['ru']), 'ru');
@@ -116,11 +116,49 @@ test('untranslateConfig restores originals on save', () => {
   assert.equal(untranslateConfig(cfg, {}), cfg);
 });
 
+test('dedupe and batches keep groups together', () => {
+  const rows = [
+    { key: 'entity:a.energy_returned', text: 'Energy returned', about: 'sensor', group: 'd1', groupLabel: 'Boiler' },
+    { key: 'entity:b.energy_returned', text: 'Energy returned', about: 'sensor', group: 'd2', groupLabel: 'Dryer' },
+    { key: 'entity:b.power', text: 'Power', about: 'sensor', group: 'd2', groupLabel: 'Dryer' },
+    { key: 'entity:c.lock', text: 'Lock', about: 'lock' },
+    { key: 'entity:d.lock', text: 'Lock', about: 'sensor' },
+  ];
+  const units = dedupeRows(rows);
+  assert.equal(units.length, 4);
+  assert.deepEqual(units[0].keys, ['entity:a.energy_returned', 'entity:b.energy_returned']);
+  assert.deepEqual(units.map((u) => u.id), [1, 2, 3, 4]);
+  const many = Array.from({ length: 7 }, (_, i) => ({ id: i + 1, text: `x${i}`, group: i < 4 ? 'big' : i < 6 ? 'small' : null }));
+  const batches = packBatches(many, 5);
+  // The group of 4 and the group of 2 never share a batch of 5 with a split; the single fills a gap.
+  assert.deepEqual(batches.map((b) => b.map((u) => u.id)), [[1, 2, 3, 4, 7], [5, 6]]);
+  assert.deepEqual(packBatches(Array.from({ length: 7 }, (_, i) => ({ id: i, group: 'g' })), 3).map((b) => b.length), [3, 3, 1]);
+});
+
+test('AI reply parsing and review flags', () => {
+  assert.deepEqual(parseAiReply('ok:\n```json\n{"t": {"1": " Бар ", "2": ""}, "unsure": [3]}\n```'), { byId: { 1: 'Бар' }, unsure: new Set(['3']) });
+  assert.deepEqual(parseAiReply({ 1: 'Бар' }).byId, { 1: 'Бар' });
+  // Cut off mid-reply: the complete pairs survive.
+  assert.deepEqual(parseAiReply('{"t": {"1": "Бар", "2": "Кухня \\"А\\"", "3": "Сп').byId, { 1: 'Бар', 2: 'Кухня "А"' });
+  const rows = [
+    { key: 'entity:h', original: 'Humidity' }, { key: 'entity:w', original: 'Wetness' },
+    { key: 'device:a', original: 'AdGuard' }, { key: 'text:x', original: 'Bar' }, { key: 'text:y', original: 'OK' },
+  ];
+  const flags = reviewSuggestions(rows, { 'entity:w': 'Влажность', 'device:a': 'AdGuard', 'text:x': 'Барная стойка в гостиной комнате', 'text:y': 'OK' }, { 'entity:h': 'влажность' }, new Set(['text:x']));
+  assert.deepEqual(flags, {
+    'entity:w': ['same as another name'], 'text:x': ['AI unsure', 'much longer'],
+  });
+});
+
 test('translation prompt and reply parsing', () => {
-  const items = [{ key: 'area:living_room', text: 'Living Room', about: 'room name' }, { key: 'text:Bar', text: 'Bar' }];
+  const items = dedupeRows([
+    { key: 'area:living_room', text: 'Living Room', about: 'room name' },
+    { key: 'text:Bar', text: 'Bar', group: 'v', groupLabel: 'dashboard "Home", view "Rooms"' },
+  ]);
   const prompt = buildTranslationPrompt({ from: 'en', to: 'ru', fromName: 'English', toName: 'Russian', items });
   assert.match(prompt, /from English \(en\) to Russian \(ru\)/);
-  assert.match(prompt, /"key": "area:living_room"/);
+  assert.match(prompt, /No group\n\{"id":1,"text":"Living Room","about":"room name"\}/);
+  assert.match(prompt, /Group: "dashboard \\"Home\\", view \\"Rooms\\""\n\{"id":2,"text":"Bar"\}/);
   assert.doesNotMatch(prompt, /"about": undefined/);
   assert.doesNotMatch(prompt, /Glossary/);
   const glossary = pickGlossary(
@@ -136,8 +174,8 @@ test('translation prompt and reply parsing', () => {
   );
   assert.deepEqual(glossary.map((g) => g.text), ['Bar', 'Living room', 'Kitchen lamp']);
   assert.equal(glossary[1].translation, 'Гостиная');
-  assert.match(buildTranslationPrompt({ from: 'en', to: 'ru', items, glossary }), /Glossary[^]*"Bar": "Бар"/);
-  const valid = new Set(items.map((i) => i.key));
+  assert.match(buildTranslationPrompt({ from: 'en', to: 'ru', items, glossary }), /Glossary[^]*"Bar":"Бар"/);
+  const valid = new Set(['area:living_room', 'text:Bar']);
   // Prose and code fences around the JSON, an unknown key, an empty value.
   const reply = 'Here you go:\n```json\n{"area:living_room": " Гостиная ", "text:Bar": "", "area:other": "x"}\n```';
   assert.deepEqual(parseTranslationReply(reply, valid), { 'area:living_room': 'Гостиная' });
@@ -159,4 +197,20 @@ test('collectConfig finds strings and entity IDs', () => {
   });
   assert.deepEqual([...strings].sort(), ['Bar', 'Home', 'Rooms']);
   assert.deepEqual([...entityIds].sort(), ['light.bar_lamp', 'sensor.a', 'sensor.b']);
+});
+
+test('collectConfig records where strings appear', () => {
+  const { contexts } = collectConfig({
+    views: [
+      { title: 'Transport', sections: [{ type: 'grid', title: 'Buses', cards: [{ type: 'custom:mushroom-title-card', title: '> TRANSIT' }] }] },
+      { path: 'other', cards: [{ type: 'tile', entity: 'light.x', name: '> TRANSIT' }] },
+    ],
+  }, 'Home');
+  const at = contexts.get('> TRANSIT');
+  assert.deepEqual(at.map((c) => [placeOf(c), roleOf(c)]), [
+    ['dashboard "Home", view "Transport"', 'mushroom-title-card card, title'],
+    ['dashboard "Home", view "other"', 'tile card, name'],
+  ]);
+  assert.equal(roleOf(contexts.get('Buses')[0]), 'section card, title');
+  assert.equal(roleOf(contexts.get('Transport')[0]), 'view title');
 });

@@ -208,41 +208,149 @@ export function pickGlossary(items, known, max = 60) {
 }
 
 /**
- * Prompt for translating editor rows with any AI (Home Assistant's AI Task, or pasted into a chat by hand).
- * items: [{ key, text, about }]; glossary: [{ text, translation }] the user already has.
- * The reply is a JSON object mapping each key to its translation.
+ * Turns editor rows into translation units: one per distinct text and description, so a name used by several
+ * devices or tabs is translated once and the same way. rows: [{ key, text, about, group, groupLabel }].
+ * Returns [{ id, text, about, group, groupLabel, keys }], ids counting from 1.
+ */
+export function dedupeRows(rows) {
+  const byText = new Map();
+  for (const r of rows) {
+    const sig = `${r.text}\n${r.about || ''}`;
+    const unit = byText.get(sig);
+    if (unit) unit.keys.push(r.key);
+    else byText.set(sig, { text: r.text, about: r.about, group: r.group ?? null, groupLabel: r.groupLabel, keys: [r.key] });
+  }
+  return [...byText.values()].map((u, i) => ({ id: i + 1, ...u }));
+}
+
+/**
+ * Packs units into batches of at most `max`, keeping each group (a device, a room, a dashboard view) together so
+ * the AI sees related names side by side. A group larger than `max` is split; ungrouped units fill the gaps.
+ */
+export function packBatches(units, max = 30) {
+  const groups = new Map();
+  for (const u of units) {
+    const g = u.group ?? null;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(u);
+  }
+  const chunks = [];
+  for (const list of groups.values()) for (let i = 0; i < list.length; i += max) chunks.push(list.slice(i, i + max));
+  // Largest first, then fill each batch with whatever still fits.
+  chunks.sort((a, b) => b.length - a.length);
+  const batches = [];
+  for (const chunk of chunks) {
+    const fit = batches.find((b) => b.length + chunk.length <= max);
+    if (fit) fit.push(...chunk);
+    else batches.push([...chunk]);
+  }
+  return batches;
+}
+
+/**
+ * Prompt for translating units with any AI (Home Assistant's AI Task, or pasted into a chat by hand).
+ * items: units from dedupeRows; glossary: [{ text, translation }] the user already has.
+ * The reply is {"t": {id: translation}, "unsure": [ids]}, read by parseAiReply.
  */
 export function buildTranslationPrompt({ from, to, fromName, toName, items, glossary = [] }) {
   const name = (n, code) => (n && n !== code ? `${n} (${code})` : code);
   const lines = [
-    `Translate names shown in a Home Assistant smart-home app from ${name(fromName, from)} to ${name(toName, to)}.`,
+    `Translate the labels of a Home Assistant smart-home app from ${name(fromName, from)} to ${name(toName, to)}: names of rooms, devices, sensors and controls, dashboard headings and state values.`,
     '',
     'Rules:',
-    '- Short, natural, grammatically correct labels, the way a native speaker would expect them on a home dashboard.',
-    '- Translate the meaning, not the words. Names from integrations are often terse ("Distance reset" is the distance since the last reset). Use "about" (device, type, unit, current value) to work out what is meant.',
-    '- Keep brand, model and product names, codes and numbers unchanged (for example "PAX Calima", "X40 Ultra", "PM2.5"). Unit symbols take the standard form of the target language, if it has one.',
-    '- Translate everyday abbreviations ("AC" is air conditioner, "est." is estimate) the way the target language usually shortens them.',
-    '- A room or place at the end of a name ("Route Bedroom", "Wetness Kitchen") is a qualifier: join it the way the language does it (a preposition, a case or a separator), not as two capitalized words side by side.',
-    '- Many entity names are shown after their device name ("Breezer" + "Air mode"): translate only the given part, so that both read well together.',
-    '- Be consistent: the same word or phrase gets the same translation everywhere, in every item.',
-    '- Keep different names distinguishable: two different originals must not get the same translation.',
-    "- ALL CAPS stays ALL CAPS. Otherwise use the target language's usual capitalization for labels.",
-    '- "about" says what the text is and where it appears. Do not translate it.',
+    '1. Translate the meaning, not word for word. Integration names are often terse: use the group and "about" (type, unit, range, options) to work out what is meant. Write short, natural, grammatically correct labels.',
+    "2. Keep brand, model and product names, codes and numbers as they are. Everyday abbreviations (AC, TV, est.) and unit symbols take the target language's usual form.",
+    '3. Items in a device group are shown after the device name, unless "about" says "full name": translate only the given text, so that both read well together. A room at the end of a name is a qualifier: join it the way the language does, not as two capitalized words.',
+    '4. Be consistent: the same word gets the same translation in every item and follows the glossary. Different texts in one group must not get the same translation.',
+    "5. Keep ALL CAPS as ALL CAPS; otherwise use the language's usual capitalization for labels.",
+    '6. Group names and "about" only describe the text. Never translate them.',
+    '',
+    'Terse names that are easy to get wrong:',
+    '- "Distance reset", "Average speed start": readings since the last reset / since the trip started, not actions.',
+    '- "Wetness" on a robot vacuum: how wet the mop is, not air humidity. "Route": the cleaning pattern.',
+    '- "Eco away", "Frost": heating or cooling presets (eco while nobody is home; frost protection).',
+    '- "Lock" as a car reading: the lock state. "Energy returned": energy fed back to the grid.',
   ];
   if (glossary.length) {
     lines.push(
       '',
-      'Glossary of translations the user already has. Reuse these terms and their style:',
-      JSON.stringify(Object.fromEntries(glossary.map((g) => [g.text, g.translation])), null, 1),
+      'Glossary: translations the user already has. Reuse these terms and their style.',
+      JSON.stringify(Object.fromEntries(glossary.map((g) => [g.text, g.translation]))),
     );
+  }
+  // Grouped, each group named once.
+  const groups = [];
+  const index = new Map();
+  for (const u of items) {
+    const g = u.group ?? null;
+    if (!index.has(g)) {
+      index.set(g, { ...(u.groupLabel ? { group: u.groupLabel } : {}), items: [] });
+      groups.push(index.get(g));
+    }
+    index.get(g).items.push(u.about ? { id: u.id, text: u.text, about: u.about } : { id: u.id, text: u.text });
   }
   lines.push(
     '',
-    'Reply with only a JSON object that maps every "key" below to its translation. No comments, no code fences.',
+    'Reply with only this JSON, no comments or code fences: {"t": {"<id>": "<translation>", ...}, "unsure": [<ids>]}. Every id must be in "t". List in "unsure" only the ids whose meaning you had to guess, usually none or a few.',
     '',
-    JSON.stringify(items.map(({ key, text, about }) => (about ? { key, text, about } : { key, text })), null, 1),
+    // One line per item: compact for the model, still readable when pasted into a chat.
+    groups.map((g) => `${g.group ? `Group: ${JSON.stringify(g.group)}` : 'No group'}\n${g.items.map((i) => JSON.stringify(i)).join('\n')}`).join('\n\n'),
   );
   return lines.join('\n');
+}
+
+/**
+ * Reads a reply to buildTranslationPrompt: {"t": {...}, "unsure": [...]} or a plain {id: translation} object,
+ * possibly wrapped in prose or code fences. A reply cut off in the middle still gives its complete pairs.
+ * Returns { byId: {id: translation}, unsure: Set of ids }.
+ */
+export function parseAiReply(reply) {
+  let data = reply && typeof reply === 'object' ? reply : null;
+  if (!data) {
+    const s = String(reply || '').replace(/```(?:json)?/gi, '');
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    try {
+      if (start >= 0 && end > start) data = JSON.parse(s.slice(start, end + 1));
+    } catch (e) { /* cut off or malformed: salvage the pairs below */ }
+    if (!data) {
+      data = { t: {} };
+      for (const m of s.matchAll(/"(\d+)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+        try { data.t[m[1]] = JSON.parse(`"${m[2]}"`); } catch (e) { /* skip a broken pair */ }
+      }
+    }
+  }
+  const map = data.t && typeof data.t === 'object' ? data.t : data;
+  const byId = {};
+  for (const [k, v] of Object.entries(map)) if (/^\d+$/.test(k) && typeof v === 'string' && v.trim()) byId[k] = v.trim();
+  const unsure = new Set(Array.isArray(data.unsure) ? data.unsure.map(String) : []);
+  return { byId, unsure };
+}
+
+/**
+ * Marks suggestions worth a second look. rows: the tab's rows ({ key, original }); suggestions and saved:
+ * key → text. Returns key → [reasons], for suggestions only.
+ */
+export function reviewSuggestions(rows, suggestions, saved = {}, unsure = new Set()) {
+  const flags = {};
+  const add = (key, reason) => { (flags[key] ||= []).push(reason); };
+  const byTranslation = new Map();
+  for (const r of rows) {
+    const t = suggestions[r.key] || saved[r.key];
+    if (!t) continue;
+    const norm = t.trim().toLowerCase();
+    if (!byTranslation.has(norm)) byTranslation.set(norm, new Set());
+    byTranslation.get(norm).add(String(r.original).trim().toLowerCase());
+  }
+  for (const r of rows) {
+    const t = suggestions[r.key];
+    if (!t) continue;
+    const original = String(r.original).trim();
+    if (unsure.has(r.key)) add(r.key, 'AI unsure');
+    if (byTranslation.get(t.trim().toLowerCase()).size > 1) add(r.key, 'same as another name');
+    if (t.length > 3 * original.length + 10) add(r.key, 'much longer');
+  }
+  return flags;
 }
 
 /**
@@ -281,20 +389,42 @@ function pickValid(data, validKeys, language) {
  * Collects the visible strings and entity IDs of a dashboard config, for the editor. Strings longer than 200
  * characters or containing templates are skipped: exact-match translation cannot handle them.
  */
-export function collectConfig(config) {
+export function collectConfig(config, dashboard) {
   const strings = new Set();
   const entityIds = new Set();
+  // Where each string appears: [{ dashboard, view, card, key }], at most 3 per string.
+  const contexts = new Map();
   const isEntityId = (s) => /^[a-z_]+\.[a-z0-9_]+$/.test(s);
-  const walk = (node, key) => {
+  const walk = (node, key, ctx) => {
     if (typeof node === 'string') {
       const s = node.trim();
       if (isEntityId(s) && (key === 'entity' || key === 'entities' || key === 'entity_id')) entityIds.add(s);
-      else if (TEXT_KEYS.has(key) && s && s.length <= 200 && !/\{\{|\{%/.test(s) && !isEntityId(s)) strings.add(s);
+      else if (TEXT_KEYS.has(key) && s && s.length <= 200 && !/\{\{|\{%/.test(s) && !isEntityId(s)) {
+        strings.add(s);
+        if (!contexts.has(s)) contexts.set(s, []);
+        const list = contexts.get(s);
+        if (list.length < 3) list.push({ ...ctx, key });
+      }
       return;
     }
-    if (Array.isArray(node)) node.forEach((x) => walk(x, key === 'entities' ? 'entities' : key));
-    else if (node && typeof node === 'object') for (const k of Object.keys(node)) walk(node[k], k);
+    if (Array.isArray(node)) {
+      node.forEach((x, i) => {
+        const inner = key === 'views' && x && typeof x === 'object' ? { ...ctx, view: x.title || x.path || `view ${i + 1}`, card: undefined } : ctx;
+        walk(x, key === 'entities' ? 'entities' : key, inner);
+      });
+    } else if (node && typeof node === 'object') {
+      let inner = ctx;
+      if (key === 'sections') inner = { ...ctx, card: 'section' };
+      else if (typeof node.type === 'string' && key !== 'views') inner = { ...ctx, card: node.type.replace(/^custom:/, '') };
+      for (const k of Object.keys(node)) walk(node[k], k, inner);
+    }
   };
-  walk(config, undefined);
-  return { strings, entityIds };
+  walk(config, undefined, { dashboard });
+  return { strings, entityIds, contexts };
 }
+
+/** "dashboard "Home", view "Transport"": the place a dashboard string appears, for grouping and the AI. */
+export const placeOf = (c) => [c.dashboard && `dashboard "${c.dashboard}"`, c.view && `view "${c.view}"`].filter(Boolean).join(', ');
+
+/** "heading card, title", "view title": what a dashboard string is. */
+export const roleOf = (c) => (c.card ? `${c.card} card, ${c.key}` : c.view ? `view ${c.key}` : `dashboard ${c.key}`);
