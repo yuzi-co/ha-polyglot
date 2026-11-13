@@ -1,7 +1,7 @@
 """Constants for Polyglot."""
 
 DOMAIN = "polyglot"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 STATIC_URL = "/polyglot_static"
 PANEL_URL = "polyglot"
 STORAGE_KEY = "polyglot.translations"

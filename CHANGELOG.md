@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-11-13)
+
+### Changed
+- The sidebar entry is now "Polyglot" (the page heading stays "Translations"): a name that needs no translation
+  and matches the integration's name in Settings and HACS.
 
 ### Fixed
 - Right-to-left languages (tested with Hebrew): the Translations page keeps its English text left to right in a

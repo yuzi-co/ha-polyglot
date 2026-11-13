@@ -44,7 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         frontend_url_path=PANEL_URL,
         webcomponent_name="polyglot-panel",
         module_url=f"{STATIC_URL}/polyglot-panel.js?v={version}",
-        sidebar_title="Translations",
+        sidebar_title="Polyglot",
         sidebar_icon="mdi:translate",
         require_admin=True,
         config={},

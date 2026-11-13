@@ -18,7 +18,7 @@ The Translations page, where an admin fills in the names:
 
 ## How it works
 
-- **Translations page** (admin only, sidebar → Translations). One row per area, floor, device, entity and dashboard
+- **Translations page** (admin only, sidebar → Polyglot). One row per area, floor, device, entity and dashboard
   string, one input per row. Pick a language, type, press Enter. Export and import as JSON.
 - **Use Home Assistant's names**: many entities are named by their integration, and Home Assistant already has
   those names in other languages; it just shows entity names in the system language. The Entities tab fills those

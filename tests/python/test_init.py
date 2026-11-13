@@ -20,7 +20,7 @@ async def test_setup_registers_panel_and_overlay(hass: HomeAssistant, entry: Moc
     assert entry.state is ConfigEntryState.LOADED
     panel = hass.data[DATA_PANELS]["polyglot"]
     assert panel.require_admin
-    assert panel.sidebar_title == "Translations"
+    assert panel.sidebar_title == "Polyglot"
     urls = _overlay_urls(hass)
     assert len(urls) == 1
     # Version plus a hash of the frontend files, so browsers fetch new modules after any change.
