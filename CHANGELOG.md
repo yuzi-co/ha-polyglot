@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 (2026-11-15)
+
+No changes to how Polyglot works. The first release from the public repository.
+
+### Changed
+- README: one-click buttons to open Polyglot in the Marketplace (Home Assistant 2026.11 and newer, where HACS is
+  built in) and to add the integration, plus the HACS path for older versions.
+
 ## 0.2.2 (2026-11-15)
 
 ### Added
