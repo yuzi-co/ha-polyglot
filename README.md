@@ -61,6 +61,8 @@ Home Assistant 2026.3 or newer. Tested on 2026.3, 2026.6, 2026.9 and 2026.11, an
 
 Reload open browser tabs and the companion app after installing or upgrading.
 
+An AI Task is optional: without one, use *Copy for any AI* or type the translations yourself.
+
 ## What gets translated
 
 | | Translated |
@@ -100,6 +102,55 @@ update, or the preview of a template helper).
 - Polyglot depends on Home Assistant frontend internals. If a release changes them, Polyglot switches itself off and
   everyone sees the original names until an update. Check the browser console for `[polyglot]` messages.
 
+## Questions
+
+**Nothing is translated.** Check, in this order:
+- The person's profile language (bottom left → Language) is one of the languages added on the Polyglot page.
+  `pt-BR` also uses a `pt` dictionary, and the other way round.
+- It is not the system language. Names are taken to be written in that one, so those people see them as they are.
+- The page is not Settings, Developer tools or the profile: those always show the original names.
+- The browser tab or the companion app was reloaded after installing or upgrading.
+- The browser console has no `[polyglot]` warning.
+
+**Names are translated but headings and card titles are not.** You are an admin. Admins see the original dashboard
+text unless they turn on *Translate dashboard text for me too* on the Polyglot page. Everyone else gets it
+translated. Also, dashboard text is matched as a whole string: `Living room temperature` needs its own row.
+
+**Does it rename anything?** No. Entity IDs, names in the registries, automations, scripts, history and voice
+assistants all keep using the original names. Polyglot only changes what a browser or the companion app shows.
+
+**Does Assist understand the translated names?** No. Assist, notifications and everything else that runs on the
+server know only the original names. Use Home Assistant's aliases for names in other languages.
+
+**Does it work in the companion app?** Yes, in the app's dashboards. Widgets, the watch app, Android Auto and
+notifications are built outside the frontend and show the original names.
+
+**Does it work with my custom cards?** With cards that take names from Home Assistant's `hass` object, which is
+nearly all of them. A card that fetches names itself, or text typed into a config key Polyglot does not know
+(it translates `name`, `title`, `heading`, `label`, `primary`, `secondary`, `content`, `text` and a few more),
+stays as it is.
+
+**YAML dashboards?** Entity, device and area names are translated on them like anywhere else. Their text is
+translated too when the same string has a row, but the Polyglot page only lists text from dashboards stored in
+the UI.
+
+**I renamed an entity ID, or removed a device.** Translations are stored by ID. The old row moves to the top of its
+tab, marked as no longer existing: copy its text to the new row, then clear it.
+
+**Where are the translations, and are they backed up?** In `.storage/polyglot.translations`, part of every Home
+Assistant backup. *Export* on the Polyglot page writes the same data as a JSON file.
+
+**What happens when I disable or remove Polyglot?** Disabling it keeps the translations and everyone sees the
+original names again. Removing the integration deletes them: export first if you may want them back.
+
+**What does the AI get?** Only what you send with the AI buttons: the untranslated names on the open tab, a short
+description of each (type, unit, range, first options, numeric value) and matching entries of your existing
+translations. On the *State values* tab the state texts themselves. Nothing is sent on its own, and nothing is
+saved before you review it.
+
+**Is it slow?** No. People without a dictionary get the original objects untouched. For the others, names are
+swapped once per change and unchanged entities keep the same objects, so cards do not redraw more often.
+
 ## Development
 
 ```
@@ -109,7 +160,7 @@ pytest                                  # integration: setup, storage, WebSocket
 ruff check . && ruff format --check .
 ```
 
-CI runs all of these plus hassfest and the HACS check on every push.
+CI runs all of these plus hassfest on every push, and the HACS check once the repository is public.
 
 The frontend is plain ES modules served straight from `custom_components/polyglot/frontend`, no build step.
 `core.js` holds the pure translation logic and is what the tests cover.

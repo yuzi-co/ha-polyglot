@@ -893,4 +893,6 @@ class PolyglotPanel extends HTMLElement {
   }
 }
 
-customElements.define('polyglot-panel', PolyglotPanel);
+// A tab that stayed open across an upgrade loads this module again under its new URL; defining the element twice
+// throws and would leave the panel failing to load until the tab is reloaded.
+if (!customElements.get('polyglot-panel')) customElements.define('polyglot-panel', PolyglotPanel);

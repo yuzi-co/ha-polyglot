@@ -283,21 +283,41 @@ async function main() {
     }
   };
 
-  let dashboardSig = null; // what the open dashboard was last fetched for, null = original text
+  let dashboardSig = null; // dashboard text the open dashboard was last fetched for, null = original text
   // A dashboard that was already there when this module started has cards whose templates subscribed without the
-  // `language` variable. It gets one reload even for someone who sees the original names.
+  // `language` variable. It gets one reload, and only if its config mentions `language` at all: a reload redraws
+  // the whole dashboard, which nobody should see on every page load for nothing.
   const startedLate = Boolean(deepFind(el, 'ha-panel-lovelace'));
-  // The first dashboard config is fetched, and its cards subscribe to templates, before this module loads. Re-fetch
-  // it once a dictionary is known, so text gets translated and templates get the `language` variable.
+  let templatesChecked = false;
+  const mentionsLanguage = (panel) => {
+    try {
+      const config = panel && panel.lovelace && (panel.lovelace.rawConfig || panel.lovelace.config);
+      return Boolean(config) && JSON.stringify(config).includes('language');
+    } catch (e) {
+      return false;
+    }
+  };
+  // The first dashboard config is usually fetched before this module loads. Re-fetch it once the dashboard text
+  // for this user is known, and again only when that text changes: names reach the cards through `hass`, so
+  // saving an entity's translation does not make every open dashboard fetch its config again.
   const reloadDashboard = (force = false) => {
-    // Users seeing original names need no reload, except the one that gives early templates their `language`.
-    // Otherwise only the language and the dashboard text count: names reach the cards through `hass`, so saving
-    // an entity's translation does not make every open dashboard fetch its config again.
-    const sig = !language ? (startedLate ? 'original' : null) : dashboardTextFor() ? textSig : language;
-    if (!force && sig === dashboardSig) return;
+    const sig = language && dashboardTextFor() ? textSig : null;
+    let needed = force || sig !== dashboardSig;
     dashboardSig = sig;
-    const panel = deepFind(el, 'ha-panel-lovelace');
-    if (panel && typeof panel._fetchConfig === 'function') panel._fetchConfig(false);
+    let panel;
+    if (!templatesChecked) {
+      templatesChecked = true;
+      if (!needed && startedLate) {
+        panel = deepFind(el, 'ha-panel-lovelace');
+        needed = mentionsLanguage(panel);
+      }
+    }
+    if (!needed) return;
+    panel = panel || deepFind(el, 'ha-panel-lovelace');
+    if (!panel || typeof panel._fetchConfig !== 'function') return;
+    // Never under someone editing the dashboard: the next time it is opened it is fetched anyway.
+    if (panel.lovelace && panel.lovelace.editMode) return;
+    panel._fetchConfig(false);
   };
 
   async function subscribe() {
@@ -320,7 +340,8 @@ async function main() {
           const sig = lang ? `${lang}\n${JSON.stringify(dict)}` : '';
           if (sig === dictSig) return;
           dictSig = sig;
-          textSig = lang ? `${lang}\n${JSON.stringify(Object.entries(dict).filter(([k]) => k.startsWith('text:')))}` : null;
+          const texts = Object.entries(dict).filter(([k]) => k.startsWith('text:'));
+          textSig = lang && texts.length ? `${lang}\n${JSON.stringify(texts)}` : null;
           language = lang;
           currentDict = dict;
           translator = createTranslator(dict);

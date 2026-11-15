@@ -12,6 +12,7 @@
 - Each browser gets only the dictionary for its own language, and only when that one changes.
 - Suggestions are kept when you switch to another language and back.
 - An import with an entry the server would refuse imports nothing, instead of stopping halfway.
+- README: a Questions section.
 
 ### Fixed
 - Clearing a suggestion drops it; *Save all* no longer saves it anyway.
@@ -25,7 +26,10 @@
   longer turned into its original.
 - Taking control of a generated dashboard while names are translated saved the translated names into it.
 - Card templates of someone without a dictionary could miss the `language` variable on the first dashboard.
+  Such a dashboard gets one reload, and only if it uses `language`.
 - After reloading or disabling the integration, open pages follow along without a browser reload.
+- A tab left open across an upgrade no longer fails to open the Polyglot page.
+- A dashboard is never fetched again under someone who is editing it.
 - Setup text and README said "Translations" for the sidebar entry renamed to "Polyglot" in 0.2.1.
 
 ## 0.2.1 (2026-11-13)
