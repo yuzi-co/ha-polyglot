@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Use Home Assistant's own names automatically**: a switch on the Polyglot page, off by default. Entities still
+  named by their integration or their device class show Home Assistant's own name in each person's language, in
+  every language, with no row to fill in. Renamed entities and your own translations are left alone.
+
 ## 0.2.3 (2026-11-15)
 
 No changes to how Polyglot works. The first release from the public repository.

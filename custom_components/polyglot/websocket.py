@@ -24,6 +24,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set)
     websocket_api.async_register_command(hass, ws_set_many)
     websocket_api.async_register_command(hass, ws_languages)
+    websocket_api.async_register_command(hass, ws_settings)
 
 
 @websocket_api.websocket_command(
@@ -45,7 +46,12 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
     def send(changed: str | None = None) -> None:
         store = _store(hass)
         if store is None:
-            data: dict[str, Any] = {"primary": hass.config.language, "languages": [], "translations": {}}
+            data: dict[str, Any] = {
+                "primary": hass.config.language,
+                "languages": [],
+                "translations": {},
+                "auto_names": False,
+            }
         elif user_language is None:
             data = store.as_dict()
         else:
@@ -117,3 +123,10 @@ def ws_set_many(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
 @callback
 def ws_languages(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
     _write(hass, connection, msg, lambda s: s.set_languages(msg["languages"]))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "polyglot/settings", vol.Required("auto_names"): bool})
+@websocket_api.require_admin
+@callback
+def ws_settings(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    _write(hass, connection, msg, lambda s: s.set_auto_names(msg["auto_names"]))

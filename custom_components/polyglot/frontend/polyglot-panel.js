@@ -356,6 +356,18 @@ class PolyglotPanel extends HTMLElement {
     await this._load();
   }
 
+  // For the whole home: entities still named by their integration show its name in each person's language.
+  async _setAutoNames(on) {
+    await this._ws({ type: 'polyglot/settings', auto_names: on });
+    this._config.auto_names = on;
+    this._render();
+  }
+
+  // Rows that need no translation here because Home Assistant's own name is shown automatically. key → name.
+  _autoShown(rows) {
+    return this._config && this._config.auto_names ? this._haNames(rows) : {};
+  }
+
   // Stored in the admin's own frontend user data, so it follows them across devices and affects nobody else.
   async _setDashboardTextForMe(on) {
     const value = { ...(this._userSettings || {}), dashboard_text_for_admin: on };
@@ -371,7 +383,7 @@ class PolyglotPanel extends HTMLElement {
     const hidden = this._hidden || { missing: 0, done: 0, total: 0 };
     const inputs = [...sr.querySelectorAll('input[data-key]')];
     const orphan = (i) => i.closest('.row') && i.closest('.row').classList.contains('orphan');
-    const missing = hidden.missing + inputs.filter((i) => !orphan(i) && !i.value.trim()).length;
+    const missing = hidden.missing + inputs.filter((i) => !orphan(i) && !i.value.trim() && i.dataset.auto === undefined).length;
     const done = hidden.done + inputs.filter((i) => i.value.trim() && !i.classList.contains('draft')).length;
     const strong = sr.querySelector('.ai strong');
     if (strong) strong.textContent = `${missing} missing`;
@@ -411,11 +423,14 @@ class PolyglotPanel extends HTMLElement {
     }
   }
 
-  // Rows of the current tab that have neither a translation nor a pending suggestion.
+  // Rows of the current tab that have neither a translation nor a pending suggestion, and are not already shown
+  // with Home Assistant's own name.
   _missingRows() {
     const dict = this._config.translations[this._language] || {};
     const drafts = this._drafts || {};
-    return this._rows().filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]);
+    const rows = this._rows().filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]);
+    const auto = this._autoShown(rows);
+    return rows.filter((r) => !auto[r.key]);
   }
 
   // The original text behind a translation key, from any tab.
@@ -668,7 +683,8 @@ class PolyglotPanel extends HTMLElement {
     const flags = draftCount ? reviewSuggestions(allRows, drafts, dict, this._unsure) : {};
     const flagCount = Object.keys(flags).length;
     if (!flagCount) this._flaggedOnly = false;
-    const isMissing = (r) => !r.orphan && !dict[r.key] && !drafts[r.key];
+    const autoShown = c && lang ? this._autoShown(allRows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key])) : {};
+    const isMissing = (r) => !r.orphan && !dict[r.key] && !drafts[r.key] && !autoShown[r.key];
     // A suggestion waiting for review: from the AI, a pasted reply or Home Assistant's own names.
     const isSuggested = (r) => Boolean(drafts[r.key]) && drafts[r.key] !== dict[r.key];
     const filter = { missing: isMissing, suggested: isSuggested, todo: (r) => isMissing(r) || isSuggested(r) }[this._show];
@@ -760,6 +776,12 @@ class PolyglotPanel extends HTMLElement {
             <span class="muted">Admins see original dashboard text by default. When on, dashboards you save get their
               translated text turned back into the original first.</span>
           </div>
+          <div class="bar">
+            <label><input type="checkbox" id="auto-names" ${c.auto_names ? 'checked' : ''}>
+              Use Home Assistant's own names automatically</label>
+            <span class="muted">For everyone: entities still named by their integration show its name in each person's
+              language, also in languages not added here. Your own translations come first.</span>
+          </div>
           ${lang ? `
             <div class="bar tabs">${TYPES.map(([t, label]) => `<button class="${t === this._type ? 'on' : ''}" data-type="${t}">${label}</button>`).join('')}</div>
             <div class="bar">
@@ -793,8 +815,8 @@ class PolyglotPanel extends HTMLElement {
             <div class="card">
               ${rows.length ? rows.map((r) => `
                 <div class="row${r.orphan ? ' orphan' : ''}">
-                  <div class="orig"><bdi>${esc(r.original)}</bdi>${r.context ? `<span class="ctx" dir="auto">${esc(r.context)}</span>` : ''}${flags[r.key] ? `<span class="flag">Check: ${esc(flags[r.key].join(', '))}</span>` : ''}</div>
-                  <input type="text" data-key="${esc(r.key)}" class="${isSuggested(r) ? 'draft' : ''}" value="${esc(drafts[r.key] || dict[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}" dir="auto">
+                  <div class="orig"><bdi>${esc(r.original)}</bdi>${r.context ? `<span class="ctx" dir="auto">${esc(r.context)}</span>` : ''}${flags[r.key] ? `<span class="flag">Check: ${esc(flags[r.key].join(', '))}</span>` : ''}${autoShown[r.key] ? `<span class="ctx">Shown automatically as: <bdi>${esc(autoShown[r.key])}</bdi></span>` : ''}</div>
+                  <input type="text" data-key="${esc(r.key)}" class="${isSuggested(r) ? 'draft' : ''}" value="${esc(drafts[r.key] || dict[r.key] || '')}" placeholder="${esc(autoShown[r.key] || r.original)}" lang="${esc(lang)}" dir="auto"${autoShown[r.key] ? ' data-auto' : ''}>
                 </div>`).join('') : '<div class="empty muted">Nothing here.</div>'}
             </div>` : '<div class="empty muted">Add a language to start, for example ru, de or fr.</div>'}
         ` : ''}
@@ -808,6 +830,8 @@ class PolyglotPanel extends HTMLElement {
     $('#import').onclick = () => $('#file').click();
     $('#file').onchange = (ev) => ev.target.files[0] && this._import(ev.target.files[0]).catch((e) => { this._error = e.message; this._render(); });
     const fail = (e) => { this._error = e.message || String(e); this._render(); };
+    const autoBox = $('#auto-names');
+    if (autoBox) autoBox.onchange = (ev) => this._setAutoNames(ev.target.checked).catch(fail);
     const me = $('#me-text');
     if (me) me.onchange = (ev) => this._setDashboardTextForMe(ev.target.checked).catch(fail);
     const sel = $('#lang');

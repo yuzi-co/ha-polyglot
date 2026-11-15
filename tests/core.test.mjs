@@ -1,7 +1,7 @@
 // Run with: node --test tests/
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, restoreConfig, reviewSuggestions, roleOf, strategyCount, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
+import { autoNames, buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, restoreConfig, reviewSuggestions, roleOf, strategyCount, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
 
 test('pickLanguage', () => {
   assert.equal(pickLanguage('ru', 'en', ['ru']), 'ru');
@@ -266,4 +266,47 @@ test('restoreConfig and strategyCount: taking control of a generated dashboard',
   assert.equal(strategyCount({ views: [{ title: 'a' }] }), 0);
   assert.equal(strategyCount({ strategy: { type: 'original-states' } }), 1);
   assert.equal(strategyCount({ views: [{ strategy: { type: 'area' } }, { title: 'a' }] }), 1);
+});
+
+test('autoNames: integration and device class names in the viewer language', () => {
+  const from = {
+    'component.demo.entity.sensor.filter_life.name': 'Filter life',
+    'component.demo.entity.sensor.zone_temp.name': '{zone} temperature',
+    'component.sensor.entity_component.battery.name': 'Battery',
+    'component.switch.entity_component._.name': 'Switch',
+  };
+  const to = {
+    'component.demo.entity.sensor.filter_life.name': 'Ресурс фильтра',
+    'component.demo.entity.sensor.zone_temp.name': 'Температура {zone}',
+    'component.sensor.entity_component.battery.name': 'Батарея',
+    'component.switch.entity_component._.name': 'Switch',
+  };
+  const entities = {
+    'sensor.a': { entity_id: 'sensor.a', platform: 'demo', translation_key: 'filter_life', name: 'Filter life' },
+    'sensor.renamed': { entity_id: 'sensor.renamed', platform: 'demo', translation_key: 'filter_life', name: 'HEPA' },
+    'sensor.zone': { entity_id: 'sensor.zone', platform: 'demo', translation_key: 'zone_temp', name: 'Hall temperature' },
+    'sensor.batt': { entity_id: 'sensor.batt', platform: 'other', name: 'Battery' },
+    'sensor.noname': { entity_id: 'sensor.noname', platform: 'demo', translation_key: 'filter_life' },
+    'switch.same': { entity_id: 'switch.same', platform: 'other', name: 'Switch' },
+  };
+  const states = { 'sensor.batt': { entity_id: 'sensor.batt', attributes: { device_class: 'battery' } } };
+  assert.deepEqual(autoNames(entities, states, from, to), {
+    'entity:sensor.a': 'Ресурс фильтра',
+    'entity:sensor.batt': 'Батарея',
+  });
+  assert.deepEqual(autoNames(entities, states, from, undefined), {});
+});
+
+test('translator falls back to automatic names, the dictionary wins', () => {
+  const auto = { 'entity:sensor.a': 'Ресурс фильтра', 'entity:sensor.b': 'Батарея' };
+  const tr = createTranslator({ 'entity:sensor.b': 'Аккумулятор' }, auto);
+  assert.equal(tr.entity({ entity_id: 'sensor.a', name: 'Filter life' }).name, 'Ресурс фильтра');
+  assert.equal(tr.entity({ entity_id: 'sensor.b', name: 'Battery' }).name, 'Аккумулятор');
+  // Automatic names alone make a working translator, and compose with the device name.
+  const only = createTranslator({}, auto);
+  assert.equal(only.has, true);
+  const s = { entity_id: 'sensor.a', attributes: { friendly_name: 'Purifier Filter life' } };
+  const entities = { 'sensor.a': { entity_id: 'sensor.a', device_id: 'd1', name: 'Filter life', next_name_part: 'device' } };
+  assert.equal(only.state(s, entities, { d1: { id: 'd1', name: 'Purifier' } }).attributes.friendly_name, 'Purifier Ресурс фильтра');
+  assert.equal(createTranslator({}, {}).has, false);
 });

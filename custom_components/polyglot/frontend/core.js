@@ -39,10 +39,15 @@ const deviceName = (d) => (d ? (d.name_by_user || d.name || '').trim() : '');
  */
 export const isDevicePrefixed = (e) => Boolean(e && e.device_id && (e.next_name_part === 'device' || e.has_entity_name));
 
-/** Builds the translator for one dictionary. Each helper returns its input unchanged when it has nothing to do. */
-export function createTranslator(dict) {
-  const has = dict && Object.keys(dict).length > 0;
-  const t = (key) => (has ? dict[key] : undefined);
+/**
+ * Builds the translator for one dictionary. Each helper returns its input unchanged when it has nothing to do.
+ * `auto` holds names to fall back on where the dictionary has none (see autoNames), in the same key format.
+ */
+export function createTranslator(dict, auto) {
+  const own = Boolean(dict) && Object.keys(dict).length > 0;
+  const fallback = Boolean(auto) && Object.keys(auto).length > 0;
+  const has = own || fallback;
+  const t = (key) => (own && dict[key]) || (fallback ? auto[key] : undefined);
 
   const area = (a) => {
     const name = a && t(`area:${a.area_id}`);
@@ -134,6 +139,38 @@ export function createTranslator(dict) {
   };
 
   return { has, area, floor, device, entity, state, text, stateText, stateParts };
+}
+
+/**
+ * Names Home Assistant itself has in the viewer's language, for entities still named by their integration or
+ * by their device class. Home Assistant shows those names in the system language to everyone; this finds the
+ * viewer's version. from, to: translation resources ("component.x.entity.sensor.y.name" → text) in the system
+ * language and the viewer's. An entity counts as still named by its integration when its name is exactly the
+ * system-language text, so renamed entities and names built from placeholders are left alone.
+ * Returns { "entity:<id>": name }.
+ */
+export function autoNames(entities, states, from, to) {
+  const out = {};
+  if (!entities || !from || !to) return out;
+  for (const id of Object.keys(entities)) {
+    const e = entities[id];
+    const name = e && typeof e.name === 'string' ? e.name.trim() : '';
+    if (!name) continue;
+    const domain = id.split('.')[0];
+    const s = states && states[id];
+    const deviceClass = s && s.attributes && s.attributes.device_class;
+    const keys = [
+      e.translation_key && e.platform && `component.${e.platform}.entity.${domain}.${e.translation_key}.name`,
+      `component.${domain}.entity_component.${deviceClass || '_'}.name`,
+    ];
+    for (const k of keys) {
+      if (!k || from[k] !== name) continue;
+      const translated = to[k];
+      if (typeof translated === 'string' && translated && translated !== name && !translated.includes('{')) out[`entity:${id}`] = translated;
+      break;
+    }
+  }
+  return out;
 }
 
 // Config keys that hold visible text in core and popular custom cards. Only these are translated, so IDs, options

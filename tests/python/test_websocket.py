@@ -133,6 +133,7 @@ async def test_subscription_survives_a_reload(hass: HomeAssistant, entry: MockCo
         "primary": hass.config.language,
         "languages": [],
         "translations": {},
+        "auto_names": False,
     }
     # Loaded again: the same subscription gets the dictionary back, and later changes too.
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -141,3 +142,29 @@ async def test_subscription_survives_a_reload(hass: HomeAssistant, entry: MockCo
     writer = await hass_ws_client(hass)
     await _call(writer, type="polyglot/set", language="ru", key="area:hall", value="Холл")
     assert (await client.receive_json())["event"]["translations"]["ru"]["area:hall"] == "Холл"
+
+
+async def test_auto_names_setting(
+    hass: HomeAssistant, entry: MockConfigEntry, hass_ws_client, hass_storage, hass_admin_user
+) -> None:
+    client = await hass_ws_client(hass)
+    assert (await _call(client, type="polyglot/config"))["result"]["auto_names"] is False
+    # Subscribers hear about it, also those without a dictionary: the names come from Home Assistant itself.
+    sub = await hass_ws_client(hass)
+    await sub.send_json_auto_id({"type": "polyglot/subscribe", "language": "de"})
+    assert (await sub.receive_json())["success"]
+    assert (await sub.receive_json())["event"]["auto_names"] is False
+    assert (await _call(client, type="polyglot/settings", auto_names=True))["success"]
+    assert (await sub.receive_json())["event"]["auto_names"] is True
+    assert (await _call(client, type="polyglot/config"))["result"]["auto_names"] is True
+    # Stored with the translations.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass_storage["polyglot.translations"]["data"]["auto_names"] is True
+    # Admin only.
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    hass_admin_user.groups = []
+    other = await hass_ws_client(hass)
+    res = await _call(other, type="polyglot/settings", auto_names=False)
+    assert res["error"]["code"] == "unauthorized"

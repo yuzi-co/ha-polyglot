@@ -15,13 +15,16 @@ SAVE_DELAY = 2
 
 
 class PolyglotStore:
-    """Languages and their translations: {"languages": [...], "translations": {lang: {key: text}}}."""
+    """Languages, their translations and settings:
+    {"languages": [...], "translations": {lang: {key: text}}, "auto_names": bool}."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.languages: list[str] = []
         self.translations: dict[str, dict[str, str]] = {}
+        # Show Home Assistant's own entity names in each user's language where there is no translation here.
+        self.auto_names = False
         # Kept in hass.data, not on the store: subscriptions of open pages outlive a reload of the integration,
         # which makes a new store.
         self._listeners: list[Callable[[str | None], None]] = hass.data.setdefault(f"{DOMAIN}_listeners", [])
@@ -30,6 +33,7 @@ class PolyglotStore:
         data = await self._store.async_load() or {}
         self.languages = list(data.get("languages", []))
         self.translations = {lang: dict(values) for lang, values in data.get("translations", {}).items()}
+        self.auto_names = bool(data.get("auto_names", False))
 
     @property
     def primary(self) -> str:
@@ -43,6 +47,7 @@ class PolyglotStore:
             "primary": self.primary,
             "languages": self.languages,
             "translations": {lang: self.translations.get(lang, {}) for lang in languages},
+            "auto_names": self.auto_names,
         }
 
     def pick(self, user_language: str | None) -> str | None:
@@ -57,7 +62,7 @@ class PolyglotStore:
             listener(language)
 
     def _data(self) -> dict[str, Any]:
-        return {"languages": self.languages, "translations": self.translations}
+        return {"languages": self.languages, "translations": self.translations, "auto_names": self.auto_names}
 
     async def async_flush(self) -> None:
         """Write now instead of after the save delay (the integration is unloading)."""
@@ -66,6 +71,11 @@ class PolyglotStore:
     async def async_remove(self) -> None:
         """Delete the stored translations (the integration is being removed)."""
         await self._store.async_remove()
+
+    @callback
+    def set_auto_names(self, enabled: bool) -> None:
+        self.auto_names = bool(enabled)
+        self._changed(None)
 
     @callback
     def set_languages(self, languages: list[str]) -> None:

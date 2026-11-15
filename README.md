@@ -24,6 +24,10 @@ The Translations page, where an admin fills in the names:
   those names in other languages; it just shows entity names in the system language. The Entities tab fills those
   in for you (as suggestions to review). It is also the first step of the AI and copy buttons, so the AI only gets
   the rest.
+- **Use Home Assistant's own names automatically** (a switch on the Polyglot page, off by default) does the same
+  without the button and for every language: an entity still named by its integration shows the integration's name
+  in each person's language, also in languages you never added. Your own translations come first. Leave it off if
+  you would rather not see those names change while the ones you typed yourself stay as they are.
 - **Translate missing with AI**: sends the untranslated names on the current tab to an AI Task set up in Home
   Assistant (Claude, OpenAI, Ollama or any other). Names go grouped by device, room or dashboard view, each
   repeated name once, with a short description: entity type, unit, range, the first few options and numeric

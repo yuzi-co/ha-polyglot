@@ -8,7 +8,7 @@
 // It relies on two frontend internals: the `home-assistant` element's `_updateHass(partial)` method and the
 // `lovelace/config` WebSocket call. If either is missing it logs a warning and does nothing.
 // core.js gets this module's ?v= query too, so a new release never runs against a cached old core.
-const { createTranslator, mapRecord, pickLanguage, restoreConfig, strategyCount, translateConfig, untranslateConfig } = await import(
+const { autoNames, createTranslator, mapRecord, pickLanguage, restoreConfig, strategyCount, translateConfig, untranslateConfig } = await import(
   new URL(`./core.js${new URL(import.meta.url).search}`, import.meta.url).href
 );
 
@@ -80,6 +80,53 @@ async function main() {
   const memo = {}; // key -> { src, deps, out }
 
   const active = () => !broken && translator.has && !RAW_PATHS.test(location.pathname);
+
+  // Home Assistant's own names (admin setting): entities still named by their integration show its name in the
+  // viewer's language where the dictionary has nothing. Needs the name translations in both languages.
+  let autoOn = false;
+  let primaryLanguage = null; // system language, the one the original names are in
+  let autoRes = null; // { key: 'from|to', from: {...}, to: {...} }
+  let autoLoading = null;
+  let autoSig = '{}';
+  let translatorDict = currentDict;
+  const baseOf = (l) => String(l || '').toLowerCase().split('-')[0];
+  const autoKey = () => `${primaryLanguage}|${subscribedFor}`;
+  const autoWanted = () => autoOn && Boolean(subscribedFor) && Boolean(primaryLanguage) && baseOf(subscribedFor) !== baseOf(primaryLanguage);
+  // Rebuilds the translator when the dictionary or the automatic names changed. Returns whether it did, so an
+  // unchanged registry update keeps the translator, and with it every memoized result.
+  const rebuildTranslator = () => {
+    const auto = autoWanted() && autoRes && autoRes.key === autoKey() ? autoNames(raw.entities, raw.states, autoRes.from, autoRes.to) : {};
+    const sig = JSON.stringify(auto);
+    if (sig === autoSig && translatorDict === currentDict) return false;
+    autoSig = sig;
+    translatorDict = currentDict;
+    translator = createTranslator(currentDict, auto);
+    return true;
+  };
+  const fetchNames = async (lang) => {
+    const out = {};
+    for (const category of ['entity', 'entity_component']) {
+      const res = await conn.sendMessagePromise({ type: 'frontend/get_translations', language: lang, category });
+      for (const [k, v] of Object.entries((res && res.resources) || {})) if (k.endsWith('.name')) out[k] = v;
+    }
+    return out;
+  };
+  const loadAuto = async () => {
+    if (!autoWanted()) return;
+    const key = autoKey();
+    if ((autoRes && autoRes.key === key) || autoLoading === key) return;
+    autoLoading = key;
+    try {
+      const [from, to] = await Promise.all([fetchNames(primaryLanguage), fetchNames(subscribedFor)]);
+      if (key !== autoKey()) return; // the language changed meanwhile
+      autoRes = { key, from, to };
+      if (rebuildTranslator()) refresh();
+    } catch (e) {
+      console.warn(TAG, "Home Assistant's own names unavailable", e);
+    } finally {
+      if (autoLoading === key) autoLoading = null;
+    }
+  };
   const isAdmin = () => Boolean(el.hass && el.hass.user && el.hass.user.is_admin);
 
   const memoize = (key, deps, fn) => {
@@ -144,6 +191,8 @@ async function main() {
           touched = true;
         }
       }
+      // New or changed entities may gain or lose an automatic name.
+      if ('entities' in obj && autoRes) rebuildTranslator();
       const out = touched ? { ...obj, ...pick(translated(), obj) } : obj;
       const result = original(out);
       if ('language' in obj || 'user' in obj) queueMicrotask(subscribe);
@@ -337,15 +386,19 @@ async function main() {
           const lang = pickLanguage(userLanguage, event.primary, event.languages || []);
           const dict = lang && event.translations ? event.translations[lang] || {} : {};
           // Every change to any language arrives here: do nothing unless this user's dictionary changed.
-          const sig = lang ? `${lang}\n${JSON.stringify(dict)}` : '';
+          const auto = Boolean(event.auto_names);
+          const sig = `${userLanguage}\n${event.primary}\n${auto}\n${lang ? `${lang}\n${JSON.stringify(dict)}` : ''}`;
           if (sig === dictSig) return;
           dictSig = sig;
+          autoOn = auto;
+          primaryLanguage = event.primary;
           const texts = Object.entries(dict).filter(([k]) => k.startsWith('text:'));
           textSig = lang && texts.length ? `${lang}\n${JSON.stringify(texts)}` : null;
           language = lang;
           currentDict = dict;
-          translator = createTranslator(dict);
+          rebuildTranslator();
           refresh();
+          loadAuto();
         },
         { type: 'polyglot/subscribe', language: userLanguage },
         { resubscribe: true },
@@ -387,6 +440,7 @@ async function main() {
   await subscribe();
   window.__polyglot = {
     get language() { return language; },
+    get autoNames() { return JSON.parse(autoSig); },
     get active() { return active(); },
     raw,
     refresh,
