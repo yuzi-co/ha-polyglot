@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-15)
 
 ### Added
 - **Use Home Assistant's own names automatically**: a switch on the Polyglot page, off by default. Entities still
