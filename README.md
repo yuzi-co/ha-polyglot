@@ -111,6 +111,10 @@ update, or the preview of a template helper).
 
 ## Questions
 
+Something not answered here? Ask in the
+[forum thread](https://community.home-assistant.io/t/polyglot-area-device-and-entity-names-in-each-users-own-language/1034770).
+Bugs go to [issues](https://github.com/yuzi-co/ha-polyglot/issues).
+
 **Nothing is translated.** Check, in this order:
 - The person's profile language (bottom left → Language) is one of the languages added on the Polyglot page.
   `pt-BR` also uses a `pt` dictionary, and the other way round.
