@@ -51,10 +51,17 @@ Home Assistant 2026.3 or newer. Tested on 2026.3, 2026.6, 2026.9 and 2026.11, an
 
 ## Install
 
-1. HACS → Custom repositories → add this repository as an *Integration*, then install Polyglot. Or copy
-   `custom_components/polyglot` into your `config/custom_components`.
+[![Open Polyglot in the Marketplace of your Home Assistant.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=yuzi-co&repository=ha-polyglot&category=integration)
+
+1. Press the button above (Home Assistant 2026.11 or newer) and install Polyglot. Or do it by hand: in Settings →
+   Marketplace, add `yuzi-co/ha-polyglot` as a custom repository of type *Integration*, then install Polyglot.
+   - Before 2026.11 the Marketplace was HACS: HACS → Custom repositories → add the same repository as an
+     *Integration*.
+   - Without either: copy `custom_components/polyglot` into your `config/custom_components`.
 2. Restart Home Assistant.
-3. Settings → Devices & services → Add integration → Polyglot.
+3. Add the integration: press the button below, or Settings → Devices & services → Add integration → Polyglot.
+
+   [![Add Polyglot to your Home Assistant.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=polyglot)
 4. Open **Polyglot** in the sidebar, add a language (the code from the HA profile, for example `ru`, `de`,
    `pt-BR`), and translate.
 5. Each person picks their language in their profile (bottom left → Language).
@@ -160,7 +167,7 @@ pytest                                  # integration: setup, storage, WebSocket
 ruff check . && ruff format --check .
 ```
 
-CI runs all of these plus hassfest on every push, and the HACS check once the repository is public.
+CI runs all of these plus hassfest on every push, and the HACS validation.
 
 The frontend is plain ES modules served straight from `custom_components/polyglot/frontend`, no build step.
 `core.js` holds the pure translation logic and is what the tests cover.
