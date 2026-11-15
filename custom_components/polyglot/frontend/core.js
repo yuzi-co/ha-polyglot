@@ -87,12 +87,21 @@ export function createTranslator(dict) {
     return tEnt || current;
   };
 
+  // The frontend makes a new `states` record on every state change but keeps the objects of unchanged entities.
+  // Results are cached per state object (and the registry entries they were built from), so an unchanged entity
+  // keeps its translated object too and cards comparing by reference do not re-render.
+  const stateCache = new WeakMap();
   const state = (stateObj, entities, devices) => {
     if (!has || !stateObj || !stateObj.attributes) return stateObj;
+    const ent = entities ? entities[stateObj.entity_id] : undefined;
+    const dev = ent && ent.device_id && devices ? devices[ent.device_id] : undefined;
+    const hit = stateCache.get(stateObj);
+    if (hit && hit.ent === ent && hit.dev === dev) return hit.out;
     const current = stateObj.attributes.friendly_name;
     const name = friendlyName(stateObj, entities, devices);
-    if (!name || name === current) return stateObj;
-    return { ...stateObj, attributes: { ...stateObj.attributes, friendly_name: name } };
+    const out = !name || name === current ? stateObj : { ...stateObj, attributes: { ...stateObj.attributes, friendly_name: name } };
+    stateCache.set(stateObj, { ent, dev, out });
+    return out;
   };
 
   const text = (s) => {
@@ -128,11 +137,14 @@ export function createTranslator(dict) {
 }
 
 // Config keys that hold visible text in core and popular custom cards. Only these are translated, so IDs, options
-// and entity IDs can never be changed, even if someone adds them to the dictionary.
+// and entity IDs are not changed, even if someone adds them to the dictionary.
 export const TEXT_KEYS = new Set([
   'name', 'title', 'heading', 'subtitle', 'label', 'primary', 'secondary', 'content', 'text', 'placeholder',
   'caption', 'description', 'message',
 ]);
+
+// What an action sends to Home Assistant (tap_action.data.message, target.label_id): never text to translate.
+export const ACTION_DATA_KEYS = new Set(['data', 'service_data', 'target']);
 
 /** Deep-copies only what changes: exact-match translation of visible strings in a dashboard config. */
 export function translateConfig(node, text, key) {
@@ -152,6 +164,7 @@ export function translateConfig(node, text, key) {
   if (node && typeof node === 'object') {
     let out = null;
     for (const k of Object.keys(node)) {
+      if (ACTION_DATA_KEYS.has(k)) continue;
       const tr = translateConfig(node[k], text, k);
       if (tr !== node[k]) {
         if (!out) out = { ...node };
@@ -169,18 +182,29 @@ export function translateConfig(node, text, key) {
  * A translation shared by several originals is left alone (no way to know which one was meant).
  */
 export function untranslateConfig(config, dict) {
+  return restoreConfig(config, Object.entries(dict || {}).filter(([key]) => key.startsWith('text:')).map(([key, value]) => [value, key.slice(5)]));
+}
+
+/**
+ * Puts originals back into a dashboard config: visible strings equal to a shown text become its original.
+ * pairs: [[shown, original]]. A shown text with several originals is left alone.
+ */
+export function restoreConfig(config, pairs) {
   const inverse = new Map();
   const ambiguous = new Set();
-  for (const [key, value] of Object.entries(dict || {})) {
-    if (!key.startsWith('text:') || typeof value !== 'string') continue;
-    const original = key.slice(5);
-    if (inverse.has(value) && inverse.get(value) !== original) ambiguous.add(value);
-    else inverse.set(value, original);
+  for (const [shown, original] of pairs) {
+    if (typeof shown !== 'string' || typeof original !== 'string') continue;
+    if (inverse.has(shown) && inverse.get(shown) !== original) ambiguous.add(shown);
+    else inverse.set(shown, original);
   }
   for (const v of ambiguous) inverse.delete(v);
   if (!inverse.size) return config;
   return translateConfig(config, (s) => (inverse.has(s.trim()) ? inverse.get(s.trim()) : s));
 }
+
+/** How many parts of a dashboard config are generated in the browser: the dashboard itself and its views. */
+export const strategyCount = (config) => (!config || typeof config !== 'object' ? 0
+  : (config.strategy ? 1 : 0) + (Array.isArray(config.views) ? config.views.filter((v) => v && v.strategy).length : 0));
 
 const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'off']);
 const words = (s) => (String(s).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter((w) => !STOP_WORDS.has(w));
@@ -399,7 +423,7 @@ export function collectConfig(config, dashboard) {
     if (typeof node === 'string') {
       const s = node.trim();
       if (isEntityId(s) && (key === 'entity' || key === 'entities' || key === 'entity_id')) entityIds.add(s);
-      else if (TEXT_KEYS.has(key) && s && s.length <= 200 && !/\{\{|\{%/.test(s) && !isEntityId(s)) {
+      else if (!ctx.noText && TEXT_KEYS.has(key) && s && s.length <= 200 && !/\{\{|\{%/.test(s) && !isEntityId(s)) {
         strings.add(s);
         if (!contexts.has(s)) contexts.set(s, []);
         const list = contexts.get(s);
@@ -416,7 +440,8 @@ export function collectConfig(config, dashboard) {
       let inner = ctx;
       if (key === 'sections') inner = { ...ctx, card: 'section' };
       else if (typeof node.type === 'string' && key !== 'views') inner = { ...ctx, card: node.type.replace(/^custom:/, '') };
-      for (const k of Object.keys(node)) walk(node[k], k, inner);
+      // Action data is still walked for entity IDs, but its strings are not text.
+      for (const k of Object.keys(node)) walk(node[k], k, ACTION_DATA_KEYS.has(k) && !inner.noText ? { ...inner, noText: true } : inner);
     }
   };
   walk(config, undefined, { dashboard });

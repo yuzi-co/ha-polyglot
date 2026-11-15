@@ -92,3 +92,52 @@ async def test_non_admin_reads_through_subscribe_only(
         res = await _call(client, **msg)
         assert not res["success"]
         assert res["error"]["code"] == "unauthorized"
+
+
+async def test_subscribe_with_language_gets_only_that_dictionary(
+    hass: HomeAssistant, entry: MockConfigEntry, hass_ws_client
+) -> None:
+    writer = await hass_ws_client(hass)
+    await _call(writer, type="polyglot/set_many", language="ru", values={"area:kitchen": "Кухня"})
+    await _call(writer, type="polyglot/set_many", language="de", values={"area:kitchen": "Küche"})
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "polyglot/subscribe", "language": "ru"})
+    assert (await client.receive_json())["success"]
+    first = (await client.receive_json())["event"]
+    assert first["languages"] == ["ru", "de"]
+    assert first["translations"] == {"ru": {"area:kitchen": "Кухня"}}
+    # A change to another language is not sent; the next message is the change to this one.
+    await _call(writer, type="polyglot/set", language="de", key="area:hall", value="Flur")
+    await _call(writer, type="polyglot/set", language="ru", key="area:hall", value="Холл")
+    update = (await client.receive_json())["event"]
+    assert update["translations"] == {"ru": {"area:kitchen": "Кухня", "area:hall": "Холл"}}
+    # A language that only matches by its base (pt-BR for pt) is picked up when it is added.
+    other = await hass_ws_client(hass)
+    await other.send_json_auto_id({"type": "polyglot/subscribe", "language": "pt-BR"})
+    assert (await other.receive_json())["success"]
+    assert (await other.receive_json())["event"]["translations"] == {}
+    await _call(writer, type="polyglot/set", language="pt", key="area:hall", value="Corredor")
+    assert (await other.receive_json())["event"]["translations"] == {"pt": {"area:hall": "Corredor"}}
+
+
+async def test_subscription_survives_a_reload(hass: HomeAssistant, entry: MockConfigEntry, hass_ws_client) -> None:
+    client = await hass_ws_client(hass)
+    await _call(client, type="polyglot/set", language="ru", key="area:kitchen", value="Кухня")
+    await client.send_json_auto_id({"type": "polyglot/subscribe", "language": "ru"})
+    assert (await client.receive_json())["success"]
+    assert (await client.receive_json())["event"]["translations"] == {"ru": {"area:kitchen": "Кухня"}}
+    # Unloaded: the open page is told to show the original names.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert (await client.receive_json())["event"] == {
+        "primary": hass.config.language,
+        "languages": [],
+        "translations": {},
+    }
+    # Loaded again: the same subscription gets the dictionary back, and later changes too.
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert (await client.receive_json())["event"]["translations"] == {"ru": {"area:kitchen": "Кухня"}}
+    writer = await hass_ws_client(hass)
+    await _call(writer, type="polyglot/set", language="ru", key="area:hall", value="Холл")
+    assert (await client.receive_json())["event"]["translations"]["ru"]["area:hall"] == "Холл"

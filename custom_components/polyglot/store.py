@@ -9,7 +9,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
-from .const import KEY_PREFIXES, MAX_VALUE_LENGTH, STORAGE_KEY, STORAGE_VERSION
+from .const import DOMAIN, KEY_PREFIXES, MAX_VALUE_LENGTH, STORAGE_KEY, STORAGE_VERSION
 
 SAVE_DELAY = 2
 
@@ -22,7 +22,9 @@ class PolyglotStore:
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.languages: list[str] = []
         self.translations: dict[str, dict[str, str]] = {}
-        self._listeners: list[Callable[[], None]] = []
+        # Kept in hass.data, not on the store: subscriptions of open pages outlive a reload of the integration,
+        # which makes a new store.
+        self._listeners: list[Callable[[str | None], None]] = hass.data.setdefault(f"{DOMAIN}_listeners", [])
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
@@ -34,23 +36,25 @@ class PolyglotStore:
         """The language the original names are written in: the system language."""
         return self.hass.config.language
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, only: str | None = None) -> dict[str, Any]:
+        """Everything, or (with `only`) the language list and that one language's translations."""
+        languages = self.languages if only is None else [lang for lang in self.languages if lang == only]
         return {
             "primary": self.primary,
             "languages": self.languages,
-            "translations": {lang: self.translations.get(lang, {}) for lang in self.languages},
+            "translations": {lang: self.translations.get(lang, {}) for lang in languages},
         }
 
+    def pick(self, user_language: str | None) -> str | None:
+        """The dictionary a user with this profile language gets, or None for the original names."""
+        return pick_language(user_language, self.primary, self.languages)
+
     @callback
-    def async_listen(self, listener: Callable[[], None]) -> Callable[[], None]:
-        self._listeners.append(listener)
-
-        @callback
-        def remove() -> None:
-            if listener in self._listeners:
-                self._listeners.remove(listener)
-
-        return remove
+    def async_notify(self, language: str | None = None) -> None:
+        """Tell subscribers that `language` changed; None means anything may have (languages added or removed,
+        the integration loaded or unloaded)."""
+        for listener in list(self._listeners):
+            listener(language)
 
     def _data(self) -> dict[str, Any]:
         return {"languages": self.languages, "translations": self.translations}
@@ -73,7 +77,7 @@ class PolyglotStore:
         self.languages = cleaned
         # Translations of removed languages are dropped on purpose: removing a language is the way to clear it.
         self.translations = {lang: v for lang, v in self.translations.items() if lang in cleaned}
-        self._changed()
+        self._changed(None)
 
     @callback
     def set_many(self, language: str, values: dict[str, str | None]) -> None:
@@ -85,7 +89,8 @@ class PolyglotStore:
             if text is not None and len(text) > MAX_VALUE_LENGTH:
                 raise ValueError(f"translation for {key} is longer than {MAX_VALUE_LENGTH} characters")
             cleaned[key] = text
-        if language not in self.languages:
+        added = language not in self.languages
+        if added:
             self.languages.append(language)
         bucket = self.translations.setdefault(language, {})
         for key, text in cleaned.items():
@@ -93,13 +98,42 @@ class PolyglotStore:
                 bucket.pop(key, None)
             else:
                 bucket[key] = text
-        self._changed()
+        self._changed(None if added else language)
 
     @callback
-    def _changed(self) -> None:
+    def _changed(self, language: str | None) -> None:
         self._store.async_delay_save(self._data, SAVE_DELAY)
-        for listener in list(self._listeners):
-            listener()
+        self.async_notify(language)
+
+
+@callback
+def async_listen(hass: HomeAssistant, listener: Callable[[str | None], None]) -> Callable[[], None]:
+    """Call `listener(language)` after every change. Works whether or not the integration is loaded right now."""
+    listeners: list[Callable[[str | None], None]] = hass.data.setdefault(f"{DOMAIN}_listeners", [])
+    listeners.append(listener)
+
+    @callback
+    def remove() -> None:
+        if listener in listeners:
+            listeners.remove(listener)
+
+    return remove
+
+
+def pick_language(user_language: str | None, primary: str, available: list[str]) -> str | None:
+    """Same rule as pickLanguage in frontend/core.js: an exact match, else the same base language, and never a
+    dictionary for someone whose language is the one the names are written in."""
+    if not user_language:
+        return None
+    if user_language in available:
+        return user_language
+
+    def base(language: str) -> str:
+        return language.lower().split("-")[0]
+
+    if base(user_language) == base(primary):
+        return None
+    return next((lang for lang in available if base(lang) == base(user_language)), None)
 
 
 def validate_key(key: str) -> None:

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Polyglot",
-        "description": "Adds a Translations page to the sidebar. Each person sees area, device, entity and dashboard names in their profile language."
+        "description": "Adds Polyglot to the sidebar, where you translate the names. Each person sees area, device, entity and dashboard names in their profile language."
       }
     },
     "abort": {

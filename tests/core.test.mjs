@@ -1,7 +1,7 @@
 // Run with: node --test tests/
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, reviewSuggestions, roleOf, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
+import { buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, restoreConfig, reviewSuggestions, roleOf, strategyCount, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
 
 test('pickLanguage', () => {
   assert.equal(pickLanguage('ru', 'en', ['ru']), 'ru');
@@ -213,4 +213,57 @@ test('collectConfig records where strings appear', () => {
   ]);
   assert.equal(roleOf(contexts.get('Buses')[0]), 'section card, title');
   assert.equal(roleOf(contexts.get('Transport')[0]), 'view title');
+});
+
+test('an unchanged state keeps its translated object across updates', () => {
+  const tr = createTranslator({ 'entity:light.a': 'Свет', 'device:d1': 'Лампа' });
+  const a = { entity_id: 'light.a', attributes: { friendly_name: 'Light' } };
+  const entities = { 'light.a': { entity_id: 'light.a', device_id: 'd1' } };
+  const devices = { d1: { id: 'd1', name: 'Lamp' } };
+  const first = tr.state(a, entities, devices);
+  assert.equal(first.attributes.friendly_name, 'Свет');
+  assert.equal(tr.state(a, entities, devices), first);
+  // Another record object with the same entries (another entity changed): still the same result object.
+  assert.equal(tr.state(a, { ...entities }, { ...devices }), first);
+  // Its registry entry changed: translated again.
+  const renamed = { 'light.a': { entity_id: 'light.a', device_id: 'd1', name: 'x' } };
+  assert.notEqual(tr.state(a, renamed, devices), first);
+  // A state with nothing to translate is returned as it is, every time.
+  const b = { entity_id: 'light.b', attributes: { friendly_name: 'B' } };
+  assert.equal(tr.state(b, entities, devices), b);
+});
+
+test('action data is neither translated nor listed', () => {
+  const tr = createTranslator({ 'text:Kitchen': 'Кухня' });
+  const config = {
+    title: 'Kitchen',
+    tap_action: { action: 'perform-action', data: { message: 'Kitchen', name: 'Kitchen' }, target: { entity_id: 'light.k', label: 'Kitchen' } },
+    hold_action: { service_data: { title: 'Kitchen' }, confirmation: { text: 'Kitchen' } },
+  };
+  const out = translateConfig(config, tr.text);
+  assert.equal(out.title, 'Кухня');
+  assert.equal(out.tap_action, config.tap_action);
+  assert.equal(out.hold_action.service_data, config.hold_action.service_data);
+  assert.equal(out.hold_action.confirmation.text, 'Кухня');
+  // Saving leaves action data as typed, even when it equals a translation.
+  const typed = { tap_action: { data: { message: 'Кухня' } } };
+  assert.equal(untranslateConfig(typed, { 'text:Kitchen': 'Кухня' }), typed);
+  const found = collectConfig({ views: [{ cards: [{ type: 'button', tap_action: { data: { message: 'Only in data' }, target: { entity_id: 'light.k' } } }] }] }, 'Home');
+  assert.equal(found.strings.has('Only in data'), false);
+  assert.equal(found.entityIds.has('light.k'), true);
+});
+
+test('restoreConfig and strategyCount: taking control of a generated dashboard', () => {
+  const pairs = [['Кухня', 'Kitchen'], ['Свет', 'Light'], ['Свет', 'Lamp']];
+  const out = restoreConfig({ views: [{ title: 'Кухня', cards: [{ type: 'heading', heading: ' Кухня ', name: 'Свет', entity: 'light.k' }] }] }, pairs);
+  assert.equal(out.views[0].title, 'Kitchen');
+  assert.equal(out.views[0].cards[0].heading, 'Kitchen');
+  // Two originals share this translation: left as shown.
+  assert.equal(out.views[0].cards[0].name, 'Свет');
+  const same = { title: 'Other' };
+  assert.equal(restoreConfig(same, pairs), same);
+  assert.equal(strategyCount(undefined), 0);
+  assert.equal(strategyCount({ views: [{ title: 'a' }] }), 0);
+  assert.equal(strategyCount({ strategy: { type: 'original-states' } }), 1);
+  assert.equal(strategyCount({ views: [{ strategy: { type: 'area' } }, { title: 'a' }] }), 1);
 });

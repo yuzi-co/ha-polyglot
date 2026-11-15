@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.2 (2026-11-15)
+
+### Added
+- A row filter on the Translations page: all rows, missing or suggested, only missing, only suggestions.
+
+### Changed
+- The AI description now says what is sent on the *State values* tab: there the state texts and options are the
+  thing being translated, so they go to the AI. Elsewhere an entity's current text state is still not sent.
+- Action data in dashboard cards (`data`, `service_data`, `target`) is no longer translated or listed.
+- Each browser gets only the dictionary for its own language, and only when that one changes.
+- Suggestions are kept when you switch to another language and back.
+- An import with an entry the server would refuse imports nothing, instead of stopping halfway.
+
+### Fixed
+- Clearing a suggestion drops it; *Save all* no longer saves it anyway.
+- Editing a suggestion and clicking *Save all* straight away keeps the edit instead of the AI's text.
+- A suggestion that would replace a saved translation is shown dashed instead of being saved unseen.
+- Cards re-rendered on every state change anywhere in the home: an unchanged entity now keeps its translated
+  state object.
+- Open dashboards fetched their config again after every saved translation, in any language. Now only when the
+  viewer's own dashboard text changes.
+- An admin who sees original dashboard text gets dashboards saved as typed; text equal to a translation is no
+  longer turned into its original.
+- Taking control of a generated dashboard while names are translated saved the translated names into it.
+- Card templates of someone without a dictionary could miss the `language` variable on the first dashboard.
+- After reloading or disabling the integration, open pages follow along without a browser reload.
+- Setup text and README said "Translations" for the sidebar entry renamed to "Polyglot" in 0.2.1.
+
 ## 0.2.1 (2026-11-13)
 
 ### Changed

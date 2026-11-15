@@ -23,7 +23,10 @@ const KIND = {
   select: 'a choice', number: 'a setting', input_number: 'a setting', input_select: 'a choice', input_boolean: 'an on/off switch',
 };
 
-const LANG_RE =/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+const LANG_RE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+// The server's rules for keys and lengths (const.py), checked before an import sends anything.
+const KEY_RE = /^(area|floor|device|entity|text|state):/;
+const MAX_LENGTH = 500;
 
 // "1 row", "2 rows".
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -45,7 +48,9 @@ class PolyglotPanel extends HTMLElement {
     this._userSettings = {};
     this._drafts = {};
     this._unsure = new Set(); // suggestion keys the AI marked as unsure
+    this._stash = {}; // language -> { drafts, unsure }: suggestions of the languages not on screen
     this._flaggedOnly = false;
+    this._show = 'all'; // row filter: all, todo (missing or suggested), missing, suggested
     // HA may create this element and set its properties before the module finished loading (it awaits core.js).
     // Those values landed as plain own properties that hide the setters below: re-apply them through the setters.
     for (const prop of ['narrow', 'panel', 'route', 'hass']) {
@@ -345,6 +350,7 @@ class PolyglotPanel extends HTMLElement {
   async _removeLanguage() {
     const lang = this._language;
     this._confirmRemove = false;
+    this._clearDrafts(); // its suggestions go with it
     const languages = this._config.languages.filter((l) => l !== lang);
     await this._ws({ type: 'polyglot/languages', languages });
     await this._load();
@@ -358,19 +364,21 @@ class PolyglotPanel extends HTMLElement {
     this._render();
   }
 
-  // Updates the missing count, the translated counter and the AI buttons from the fields as they are now.
+  // Updates the missing count, the translated counter, the suggestion count and the AI buttons from the fields
+  // as they are now. Rows a filter hides are counted as they were at the last redraw (this._hidden).
   _updateCounts() {
-    if (this._flaggedOnly) return; // the page shows a subset; the counts from the last redraw stay right enough
     const sr = this.shadowRoot;
+    const hidden = this._hidden || { missing: 0, done: 0, total: 0 };
     const inputs = [...sr.querySelectorAll('input[data-key]')];
     const orphan = (i) => i.closest('.row') && i.closest('.row').classList.contains('orphan');
-    const live = inputs.filter((i) => !orphan(i));
-    const missing = live.filter((i) => !i.value.trim()).length;
-    const done = live.length - missing;
+    const missing = hidden.missing + inputs.filter((i) => !orphan(i) && !i.value.trim()).length;
+    const done = hidden.done + inputs.filter((i) => i.value.trim() && !i.classList.contains('draft')).length;
     const strong = sr.querySelector('.ai strong');
     if (strong) strong.textContent = `${missing} missing`;
     const counter = sr.querySelector('#done-count');
-    if (counter) counter.textContent = `${done} / ${inputs.length} translated`;
+    if (counter) counter.textContent = `${done} / ${hidden.total} translated`;
+    const draftCount = sr.querySelector('#draft-count');
+    if (draftCount) draftCount.textContent = `${count(Object.keys(this._drafts || {}).length, 'suggestion', 'suggestions')} to review (dashed fields).`;
     const run = sr.querySelector('#ai-run');
     if (run && !this._aiBusy) run.disabled = !missing;
     const copy = sr.querySelector('#ai-copy');
@@ -385,7 +393,12 @@ class PolyglotPanel extends HTMLElement {
     for (const i of this.shadowRoot.querySelectorAll('input[data-key]')) {
       const key = i.dataset.key;
       const v = i.value.trim();
-      if (drafts[key] && v === drafts[key]) continue; // an untouched suggestion is not an edit
+      if (drafts[key] !== undefined) {
+        if (v === drafts[key]) continue; // an untouched suggestion is not an edit
+        // Edited or cleared: no longer a suggestion, so Save all cannot bring the AI's text back.
+        delete drafts[key];
+        this._unsure.delete(key);
+      }
       if (v !== (dict[key] || '')) values[key] = v || null;
     }
     if (!Object.keys(values).length) return;
@@ -445,7 +458,8 @@ class PolyglotPanel extends HTMLElement {
     return Object.keys(this._hass.states).filter((id) => id.startsWith('ai_task.')).sort();
   }
 
-  // Suggestions are kept per language until saved or discarded; they are never written without review.
+  // Suggestions are kept per language until saved or discarded (switching language puts them aside, see _render);
+  // they are never written without review.
   _addDrafts(values) {
     this._drafts = { ...(this._drafts || {}), ...values };
     this._draftsFor = this._language;
@@ -590,6 +604,7 @@ class PolyglotPanel extends HTMLElement {
 
   async _saveDrafts() {
     const values = { ...this._drafts };
+    if (!Object.keys(values).length) { this._clearDrafts(); this._render(); return; }
     await this._ws({ type: 'polyglot/set_many', language: this._language, values });
     const dict = (this._config.translations[this._language] ||= {});
     Object.assign(dict, values);
@@ -618,6 +633,17 @@ class PolyglotPanel extends HTMLElement {
     if (!entries.length) throw new Error('No translations found in the file. Expected the format that Export writes.');
     const bad = entries.map(([l]) => l).filter((l) => !LANG_RE.test(l));
     if (bad.length) throw new Error(`Not language codes: ${bad.join(', ')}. Nothing was imported.`);
+    // Everything the server would refuse is found first, so an import is all or nothing.
+    const refused = [];
+    for (const [language, values] of entries) {
+      for (const [k, v] of Object.entries(values)) {
+        const ok = KEY_RE.test(k) && k.length <= MAX_LENGTH && (v === null || (typeof v === 'string' && v.trim().length <= MAX_LENGTH));
+        if (!ok) refused.push(`${language} "${k.length > 40 ? `${k.slice(0, 40)}…` : k}"`);
+      }
+    }
+    if (refused.length) {
+      throw new Error(`${count(refused.length, 'entry is', 'entries are')} not valid (unknown key, not text, or longer than ${MAX_LENGTH} characters): ${refused.slice(0, 3).join(', ')}${refused.length > 3 ? ', …' : ''}. Nothing was imported.`);
+    }
     for (const [language, values] of entries) await this._ws({ type: 'polyglot/set_many', language, values });
     await this._load();
   }
@@ -626,7 +652,15 @@ class PolyglotPanel extends HTMLElement {
     const c = this._config;
     const lang = this._language;
     const dict = (c && lang && c.translations[lang]) || {};
-    if (this._draftsFor !== lang) { this._clearDrafts(); this._draftsFor = lang; }
+    if (this._draftsFor !== lang) {
+      // Another language: put this one's suggestions aside and bring back the ones waiting for the new one.
+      if (this._draftsFor && Object.keys(this._drafts || {}).length) this._stash[this._draftsFor] = { drafts: this._drafts, unsure: this._unsure };
+      const back = lang ? this._stash[lang] : null;
+      if (lang) delete this._stash[lang];
+      this._clearDrafts();
+      if (back) { this._drafts = back.drafts; this._unsure = back.unsure; }
+      this._draftsFor = lang;
+    }
     const drafts = this._drafts || {};
     const draftCount = Object.keys(drafts).length;
     const allRows = c && lang ? this._rows() : [];
@@ -634,8 +668,15 @@ class PolyglotPanel extends HTMLElement {
     const flags = draftCount ? reviewSuggestions(allRows, drafts, dict, this._unsure) : {};
     const flagCount = Object.keys(flags).length;
     if (!flagCount) this._flaggedOnly = false;
-    const rows = this._flaggedOnly ? allRows.filter((r) => flags[r.key]) : allRows;
-    const missingRows = c && lang ? allRows.filter((r) => !r.orphan && !dict[r.key] && !drafts[r.key]) : [];
+    const isMissing = (r) => !r.orphan && !dict[r.key] && !drafts[r.key];
+    // A suggestion waiting for review: from the AI, a pasted reply or Home Assistant's own names.
+    const isSuggested = (r) => Boolean(drafts[r.key]) && drafts[r.key] !== dict[r.key];
+    const filter = { missing: isMissing, suggested: isSuggested, todo: (r) => isMissing(r) || isSuggested(r) }[this._show];
+    const rows = this._flaggedOnly ? allRows.filter((r) => flags[r.key]) : filter ? allRows.filter(filter) : allRows;
+    const missingRows = c && lang ? allRows.filter(isMissing) : [];
+    const shown = new Set(rows);
+    const hiddenRows = allRows.filter((r) => !shown.has(r));
+    this._hidden = { missing: hiddenRows.filter(isMissing).length, done: hiddenRows.filter((r) => dict[r.key]).length, total: allRows.length };
     const missing = missingRows.length;
     const haCount = this._type === 'entity' ? Object.keys(this._haNames(missingRows)).length : 0;
     const aiTasks = this._hass ? this._aiTasks() : [];
@@ -724,6 +765,8 @@ class PolyglotPanel extends HTMLElement {
             <div class="bar">
               <input type="search" id="search" placeholder="Search" value="${esc(this._search)}">
               ${showToggle ? `<label class="muted"><input type="checkbox" id="used" ${this._onlyUsed ? 'checked' : ''}> Only likely visible</label>` : ''}
+              <select id="show" title="Which rows to show">${[['all', 'All rows'], ['todo', 'Missing or suggested'], ['missing', 'Missing'], ['suggested', 'Suggestions']]
+    .map(([v, label]) => `<option value="${v}" ${v === this._show ? 'selected' : ''}>${label}</option>`).join('')}</select>
               <span class="muted" id="done-count">${done} / ${allRows.length} translated</span>
             </div>
             <div class="card ai">
@@ -737,10 +780,10 @@ class PolyglotPanel extends HTMLElement {
                 <button id="ai-paste">Paste reply</button>
               </div>
               <div class="muted">${aiTasks.length
-    ? 'Sends the missing names on this tab, with a short description of each, to the chosen AI. Suggestions are shown for review and saved only when you choose.'
+    ? `Sends the missing names on this tab, with a short description of each, to the chosen AI. ${this._type === 'state' ? 'On this tab the state values themselves are what is sent: use Search to narrow them down if some are private. ' : ''}Suggestions are shown for review and saved only when you choose.`
     : 'Set up an AI Task in Home Assistant to translate here in one click, or copy the missing names into any AI chat and paste the reply back.'}</div>
               ${this._notice ? `<div class="notice">${esc(this._notice)}</div>` : ''}
-              ${draftCount ? `<div class="bar" style="margin-top:8px"><span>${count(draftCount, 'suggestion', 'suggestions')} to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button>
+              ${draftCount ? `<div class="bar" style="margin-top:8px"><span id="draft-count">${count(draftCount, 'suggestion', 'suggestions')} to review (dashed fields).</span><button id="drafts-save" class="on">Save all</button><button id="drafts-discard">Discard</button>
                 ${flagCount ? `<label><input type="checkbox" id="flagged-only" ${this._flaggedOnly ? 'checked' : ''}> Only the ${count(flagCount, 'one', 'ones')} to check here</label>` : ''}</div>` : ''}
               ${this._pasting ? `
                 ${this._manualCopy ? `<div class="muted">Copying was blocked. Select this text, copy it into an AI chat:</div><textarea readonly id="manual-copy">${esc(this._manualCopy)}</textarea>` : ''}
@@ -751,7 +794,7 @@ class PolyglotPanel extends HTMLElement {
               ${rows.length ? rows.map((r) => `
                 <div class="row${r.orphan ? ' orphan' : ''}">
                   <div class="orig"><bdi>${esc(r.original)}</bdi>${r.context ? `<span class="ctx" dir="auto">${esc(r.context)}</span>` : ''}${flags[r.key] ? `<span class="flag">Check: ${esc(flags[r.key].join(', '))}</span>` : ''}</div>
-                  <input type="text" data-key="${esc(r.key)}" class="${drafts[r.key] && !dict[r.key] ? 'draft' : ''}" value="${esc(dict[r.key] || drafts[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}" dir="auto">
+                  <input type="text" data-key="${esc(r.key)}" class="${isSuggested(r) ? 'draft' : ''}" value="${esc(drafts[r.key] || dict[r.key] || '')}" placeholder="${esc(r.original)}" lang="${esc(lang)}" dir="auto">
                 </div>`).join('') : '<div class="empty muted">Nothing here.</div>'}
             </div>` : '<div class="empty muted">Add a language to start, for example ru, de or fr.</div>'}
         ` : ''}
@@ -801,19 +844,34 @@ class PolyglotPanel extends HTMLElement {
     if (fo) fo.onchange = (ev) => { this._flaggedOnly = ev.target.checked; this._render(); };
     const mc = $('#manual-copy');
     if (mc) mc.onfocus = () => mc.select();
+    const show = $('#show');
+    if (show) show.onchange = (ev) => { this._show = ev.target.value; this._render(); };
     const used = $('#used');
     if (used) used.onchange = (ev) => { this._onlyUsed = ev.target.checked; this._render(); };
     this.shadowRoot.querySelectorAll('input[data-key]').forEach((input) => {
       const commit = async () => {
-        const before = dict[input.dataset.key] || '';
-        if (input.value.trim() === before) return;
-        try {
-          await this._save(input.dataset.key, input.value);
-          // Saved: no longer unsaved typing, so a later redraw shows the stored value, not this text.
-          input.defaultValue = input.value.trim();
-          if (this._drafts) delete this._drafts[input.dataset.key];
+        const key = input.dataset.key;
+        const v = input.value.trim();
+        // An edited or cleared suggestion is no longer a suggestion. It is dropped here, before anything is
+        // awaited, so the click on Save all that took the focus away cannot save the AI's text over the edit.
+        if (this._drafts && this._drafts[key] !== undefined && v !== this._drafts[key]) {
+          delete this._drafts[key];
+          this._unsure.delete(key);
           input.classList.remove('draft');
-          input.classList.toggle('saved', Boolean(input.value.trim()));
+        }
+        const before = (this._config.translations[this._language] || {})[key] || '';
+        if (v === before) {
+          input.defaultValue = v;
+          this._updateCounts();
+          return;
+        }
+        try {
+          await this._save(key, input.value);
+          // Saved: no longer unsaved typing, so a later redraw shows the stored value, not this text.
+          input.defaultValue = v;
+          if (this._drafts) delete this._drafts[key];
+          input.classList.remove('draft');
+          input.classList.toggle('saved', Boolean(v));
           this._updateCounts();
         } catch (e) { this._error = e.message; this._render(); }
       };

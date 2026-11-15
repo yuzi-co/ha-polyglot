@@ -49,6 +49,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         require_admin=True,
         config={},
     )
+    # Pages that stayed open across a reload are still subscribed: hand them the dictionaries again.
+    store.async_notify()
     return True
 
 
@@ -59,6 +61,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     store: PolyglotStore | None = hass.data.pop(DOMAIN, None)
     if store is not None:
         await store.async_flush()
+        # Open pages go back to the original names now, without a reload.
+        store.async_notify()
     return True
 
 

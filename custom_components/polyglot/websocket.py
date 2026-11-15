@@ -1,4 +1,5 @@
-"""WebSocket API. polyglot/subscribe is open to every user; everything that reads all data or writes is admin only."""
+"""WebSocket API. polyglot/subscribe is open to every user and gives them the dictionary for their language;
+everything that reads all data or writes is admin only."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from homeassistant.core import HomeAssistant, callback
 import voluptuous as vol
 
 from .const import DOMAIN
-from .store import PolyglotStore
+from .store import PolyglotStore, async_listen
 
 
 def _store(hass: HomeAssistant) -> PolyglotStore | None:
@@ -30,17 +31,32 @@ def async_register(hass: HomeAssistant) -> None:
 )
 @callback
 def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
-    """Send the dictionaries now and after every change. The client picks the language it needs."""
-    store = _store(hass)
-    if store is None:
+    """Send the dictionary for `language` (the user's profile language) now and whenever it changes.
+
+    Without `language` every dictionary is sent, on every change. The subscription survives a reload of the
+    integration: while Polyglot is not loaded the subscriber gets no translations, so it shows the original names.
+    """
+    if _store(hass) is None:
         connection.send_error(msg["id"], "not_loaded", "Polyglot is not loaded")
         return
+    user_language: str | None = msg.get("language")
 
     @callback
-    def send() -> None:
-        connection.send_message(websocket_api.event_message(msg["id"], store.as_dict()))
+    def send(changed: str | None = None) -> None:
+        store = _store(hass)
+        if store is None:
+            data: dict[str, Any] = {"primary": hass.config.language, "languages": [], "translations": {}}
+        elif user_language is None:
+            data = store.as_dict()
+        else:
+            picked = store.pick(user_language)
+            if changed is not None and changed != picked:
+                return  # another language changed
+            # `languages` stays complete, so the client's own pick gives the same answer.
+            data = store.as_dict(only=picked or "")
+        connection.send_message(websocket_api.event_message(msg["id"], data))
 
-    connection.subscriptions[msg["id"]] = store.async_listen(send)
+    connection.subscriptions[msg["id"]] = async_listen(hass, send)
     connection.send_result(msg["id"])
     send()
 

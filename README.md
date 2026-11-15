@@ -26,11 +26,14 @@ The Translations page, where an admin fills in the names:
   the rest.
 - **Translate missing with AI**: sends the untranslated names on the current tab to an AI Task set up in Home
   Assistant (Claude, OpenAI, Ollama or any other). Names go grouped by device, room or dashboard view, each
-  repeated name once, with a short description: entity type, unit, range, options and numeric values. Text states
-  are never sent. Your existing translations go along as a glossary, so the AI keeps your terms. Suggestions appear
-  dashed for review and are saved only with *Save all* or by editing a field. Ones worth a second look (the AI was
-  unsure, two different names got the same translation, or it is much longer than the original) are marked, with
-  a filter to show only those.
+  repeated name once, with a short description: entity type, unit, range, the first few options and numeric
+  values. An entity's current text state is not part of that description. The *State values* tab is different:
+  there the state texts and options are what gets translated, so they are sent; use Search to narrow them down if
+  some are private (an address, a caller's name). Your existing translations go along as a glossary, so the AI
+  keeps your terms. Suggestions appear dashed for review and are saved only with *Save all* or by editing a field;
+  clearing a suggestion drops it. Ones worth a second look (the AI was unsure, two different names got the same
+  translation, or it is much longer than the original) are marked, with a filter to show only those.
+- **Row filter**: show all rows, only the missing ones, only the suggestions waiting for review, or both.
 - **Copy for any AI / Paste reply**: the same request as text for any AI chat or a human translator; paste the
   JSON reply back to get the same reviewable suggestions.
 - **Overlay** that every page loads. For a user whose profile language has translations, it swaps the names in the
@@ -52,7 +55,7 @@ Home Assistant 2026.3 or newer. Tested on 2026.3, 2026.6, 2026.9 and 2026.11, an
    `custom_components/polyglot` into your `config/custom_components`.
 2. Restart Home Assistant.
 3. Settings → Devices & services → Add integration → Polyglot.
-4. Open **Translations** in the sidebar, add a language (the code from the HA profile, for example `ru`, `de`,
+4. Open **Polyglot** in the sidebar, add a language (the code from the HA profile, for example `ru`, `de`,
    `pt-BR`), and translate.
 5. Each person picks their language in their profile (bottom left → Language).
 
@@ -80,7 +83,7 @@ viewer's profile language:
 ```
 
 Use `language is defined` so the template still works where Polyglot is not loaded (the companion app before an
-update, or a template preview).
+update, or the preview of a template helper).
 
 ## Limits
 
@@ -89,6 +92,9 @@ update, or a template preview).
 - Settings, developer tools and your profile page always show original names. That is deliberate.
 - Admins see untranslated dashboard text unless they opt in. When they do and save a dashboard, text that matches a
   translation is turned back into the original first; a translation shared by two originals is saved as typed.
+- What a card's action sends to Home Assistant (`data`, `target`) is never translated.
+- Taking control of a generated dashboard while names are translated saves the original names. A translated name
+  shared by two different originals is saved as shown.
 - Settings dialogs opened from a translated page (more-info → settings → device) get the original names, so saving
   them never stores a translation.
 - Polyglot depends on Home Assistant frontend internals. If a release changes them, Polyglot switches itself off and

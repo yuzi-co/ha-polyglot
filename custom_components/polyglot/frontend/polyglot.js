@@ -8,7 +8,7 @@
 // It relies on two frontend internals: the `home-assistant` element's `_updateHass(partial)` method and the
 // `lovelace/config` WebSocket call. If either is missing it logs a warning and does nothing.
 // core.js gets this module's ?v= query too, so a new release never runs against a cached old core.
-const { createTranslator, mapRecord, pickLanguage, translateConfig, untranslateConfig } = await import(
+const { createTranslator, mapRecord, pickLanguage, restoreConfig, strategyCount, translateConfig, untranslateConfig } = await import(
   new URL(`./core.js${new URL(import.meta.url).search}`, import.meta.url).href
 );
 
@@ -71,6 +71,8 @@ async function main() {
 
   let translator = createTranslator({});
   let currentDict = {};
+  let dictSig; // language and dictionary in use, to ignore changes to other languages
+  let textSig = null; // language and its dashboard text entries
   let language = null; // dictionary language in use, null = original names
   let subscribedFor; // user language the subscription was made for
   let unsubscribe = null;
@@ -89,7 +91,7 @@ async function main() {
   };
 
   // Wrapped formatters read the current translator on every call, so one wrapper per raw function is enough.
-  const wrappers = new Map();
+  const wrappers = new WeakMap();
   const wrapFormatter = (name) => {
     const fn = raw[name];
     if (typeof fn !== 'function') return fn;
@@ -167,32 +169,69 @@ async function main() {
       const next = (ev && ev.value) || {};
       const changed = Boolean(next.dashboard_text_for_admin) !== Boolean(userSettings.dashboard_text_for_admin);
       userSettings = next;
-      if (changed && isAdmin()) { dashboardTranslatedWith = undefined; reloadDashboard(true); }
+      if (changed && isAdmin()) reloadDashboard(true);
     },
     { type: 'frontend/subscribe_user_data', key: 'polyglot' },
   ).catch((e) => console.warn(TAG, 'user settings unavailable', e));
 
-  // Dashboard text: for users who cannot edit dashboards, and admins who opted in. Saves are run through
-  // untranslateConfig, so text shown translated goes back to the original before it is stored.
+  // Dashboard text: for users who cannot edit dashboards, and admins who opted in. Their saves are run through
+  // untranslateConfig, so text shown translated goes back to the original before it is stored. Someone who sees
+  // the original text gets it saved exactly as typed.
+  //
+  // Generated dashboards (strategies, or no stored config at all) are built in the browser from the translated
+  // names. "Take control" saves that result as a normal config, so on such a save the translated area, floor,
+  // device and entity names in it are turned back into the original ones as well.
+  const generated = new Map(); // dashboard url_path -> generated parts in its config as last fetched or saved
+  const pathOf = (msg) => msg.url_path ?? null;
+  // [[translated, original]] for every name that is shown translated right now.
+  const namePairs = () => {
+    const pairs = [];
+    if (!active()) return pairs;
+    const shown = translated();
+    const add = (a, b) => { if (a && b && a !== b) pairs.push([a, b]); };
+    const each = (key, fn) => {
+      const from = raw[key] || {};
+      const to = shown[key] || {};
+      for (const id of Object.keys(to)) if (to[id] !== from[id] && from[id]) fn(to[id], from[id]);
+    };
+    each('areas', (t, o) => add(t.name, o.name));
+    each('floors', (t, o) => add(t.name, o.name));
+    each('devices', (t, o) => add(t.name_by_user, o.name_by_user || o.name));
+    each('states', (t, o) => add(t.attributes && t.attributes.friendly_name, o.attributes && o.attributes.friendly_name));
+    return pairs;
+  };
   const sendMessagePromise = conn.sendMessagePromise.bind(conn);
   conn.sendMessagePromise = (msg) => {
-    if (msg && msg.type === 'lovelace/config/save' && msg.config && translator.has && !broken) {
+    if (msg && msg.type === 'lovelace/config/save' && msg.config && !broken) {
       try {
-        msg = { ...msg, config: untranslateConfig(msg.config, currentDict) };
+        let config = msg.config;
+        if (translator.has && dashboardTextFor()) config = untranslateConfig(config, currentDict);
+        const parts = strategyCount(msg.config);
+        if (parts < (generated.get(pathOf(msg)) || 0)) config = restoreConfig(config, namePairs());
+        generated.set(pathOf(msg), parts);
+        if (config !== msg.config) msg = { ...msg, config };
       } catch (e) {
         console.warn(TAG, 'could not restore original dashboard text before saving', e);
       }
     }
     const p = sendMessagePromise(msg);
     if (!msg || msg.type !== 'lovelace/config') return p;
-    return p.then((config) => {
-      try {
-        return active() && dashboardTextFor() ? translateConfig(config, translator.text) : config;
-      } catch (e) {
-        console.warn(TAG, 'dashboard translation failed', e);
-        return config;
-      }
-    });
+    return p.then(
+      (config) => {
+        try {
+          generated.set(pathOf(msg), strategyCount(config));
+          return active() && dashboardTextFor() ? translateConfig(config, translator.text) : config;
+        } catch (e) {
+          console.warn(TAG, 'dashboard translation failed', e);
+          return config;
+        }
+      },
+      (err) => {
+        // No stored config: the frontend generates the whole dashboard.
+        if (err && err.code === 'config_not_found') generated.set(pathOf(msg), 1);
+        throw err;
+      },
+    );
   };
 
   // Templates rendered for cards (Markdown, Mushroom and others) get a `language` variable with the viewer's
@@ -244,13 +283,19 @@ async function main() {
     }
   };
 
-  let dashboardTranslatedWith = null;
+  let dashboardSig = null; // what the open dashboard was last fetched for, null = original text
+  // A dashboard that was already there when this module started has cards whose templates subscribed without the
+  // `language` variable. It gets one reload even for someone who sees the original names.
+  const startedLate = Boolean(deepFind(el, 'ha-panel-lovelace'));
   // The first dashboard config is fetched, and its cards subscribe to templates, before this module loads. Re-fetch
   // it once a dictionary is known, so text gets translated and templates get the `language` variable.
   const reloadDashboard = (force = false) => {
-    // Users seeing original names never need a reload: their templates fall back to the original language anyway.
-    if (!force && (dashboardTranslatedWith === translator || (!language && !dashboardTranslatedWith))) return;
-    dashboardTranslatedWith = language ? translator : null;
+    // Users seeing original names need no reload, except the one that gives early templates their `language`.
+    // Otherwise only the language and the dashboard text count: names reach the cards through `hass`, so saving
+    // an entity's translation does not make every open dashboard fetch its config again.
+    const sig = !language ? (startedLate ? 'original' : null) : dashboardTextFor() ? textSig : language;
+    if (!force && sig === dashboardSig) return;
+    dashboardSig = sig;
     const panel = deepFind(el, 'ha-panel-lovelace');
     if (panel && typeof panel._fetchConfig === 'function') panel._fetchConfig(false);
   };
@@ -271,6 +316,11 @@ async function main() {
         (event) => {
           const lang = pickLanguage(userLanguage, event.primary, event.languages || []);
           const dict = lang && event.translations ? event.translations[lang] || {} : {};
+          // Every change to any language arrives here: do nothing unless this user's dictionary changed.
+          const sig = lang ? `${lang}\n${JSON.stringify(dict)}` : '';
+          if (sig === dictSig) return;
+          dictSig = sig;
+          textSig = lang ? `${lang}\n${JSON.stringify(Object.entries(dict).filter(([k]) => k.startsWith('text:')))}` : null;
           language = lang;
           currentDict = dict;
           translator = createTranslator(dict);

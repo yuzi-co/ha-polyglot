@@ -1,5 +1,5 @@
 """Config flow: a single entry (single_config_entry in the manifest), no options. Languages are managed in the
-Translations panel."""
+Polyglot panel."""
 
 from __future__ import annotations
 
