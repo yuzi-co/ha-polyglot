@@ -490,3 +490,13 @@ export const placeOf = (c) => [c.dashboard && `dashboard "${c.dashboard}"`, c.vi
 
 /** "heading card, title", "view title": what a dashboard string is. */
 export const roleOf = (c) => (c.card ? `${c.card} card, ${c.key}` : c.view ? `view ${c.key}` : `dashboard ${c.key}`);
+
+// Keys of `dict` whose area, floor, device or entity no longer exists. `exists` maps a key type to a check by id;
+// types without a check (dashboard text, state values) are never reported.
+export function orphanKeys(dict, exists) {
+  return Object.keys(dict || {}).filter((key) => {
+    const i = key.indexOf(':');
+    const check = exists[key.slice(0, i)];
+    return Boolean(check) && !check(key.slice(i + 1));
+  });
+}

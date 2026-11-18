@@ -37,6 +37,8 @@ The Translations page, where an admin fills in the names:
   keeps your terms. Suggestions appear dashed for review and are saved only with *Save all* or by editing a field;
   clearing a suggestion drops it. Ones worth a second look (the AI was unsure, two different names got the same
   translation, or it is much longer than the original) are marked, with a filter to show only those.
+- **Clean up**: translations of areas, floors, devices and entities that were removed or got a new ID are listed
+  first on their tab; one button removes them all for the chosen language.
 - **Row filter**: show all rows, only the missing ones, only the suggestions waiting for review, or both.
 - **Copy for any AI / Paste reply**: the same request as text for any AI chat or a human translator; paste the
   JSON reply back to get the same reviewable suggestions.

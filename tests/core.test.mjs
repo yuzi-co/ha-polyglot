@@ -1,7 +1,7 @@
 // Run with: node --test tests/
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { autoNames, buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, restoreConfig, reviewSuggestions, roleOf, strategyCount, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
+import { autoNames, orphanKeys, buildTranslationPrompt, collectConfig, createTranslator, dedupeRows, mapRecord, packBatches, parseAiReply, parseTranslationReply, pickGlossary, pickLanguage, placeOf, restoreConfig, reviewSuggestions, roleOf, strategyCount, translateConfig, untranslateConfig } from '../custom_components/polyglot/frontend/core.js';
 
 test('pickLanguage', () => {
   assert.equal(pickLanguage('ru', 'en', ['ru']), 'ru');
@@ -309,4 +309,11 @@ test('translator falls back to automatic names, the dictionary wins', () => {
   const entities = { 'sensor.a': { entity_id: 'sensor.a', device_id: 'd1', name: 'Filter life', next_name_part: 'device' } };
   assert.equal(only.state(s, entities, { d1: { id: 'd1', name: 'Purifier' } }).attributes.friendly_name, 'Purifier Ресурс фильтра');
   assert.equal(createTranslator({}, {}).has, false);
+});
+
+test('orphanKeys lists translations of things that no longer exist', () => {
+  const dict = { 'area:kitchen': 'a', 'area:gone': 'b', 'entity:light.x': 'c', 'entity:light.old': 'd', 'text:Hello': 'e', 'state:on': 'f' };
+  const exists = { area: (id) => id === 'kitchen', entity: (id) => id === 'light.x' };
+  assert.deepEqual(orphanKeys(dict, exists), ['area:gone', 'entity:light.old']);
+  assert.deepEqual(orphanKeys(undefined, exists), []);
 });

@@ -2,8 +2,8 @@
 // Lists areas, floors, devices, entities and dashboard text with one input per row for the chosen language.
 // core.js gets this module's ?v= query too, so a new release never runs against a cached old core.
 const {
-  buildTranslationPrompt, collectConfig, dedupeRows, isDevicePrefixed, packBatches, parseAiReply, parseTranslationReply,
-  pickGlossary, placeOf, reviewSuggestions, roleOf,
+  buildTranslationPrompt, collectConfig, dedupeRows, isDevicePrefixed, orphanKeys, packBatches, parseAiReply,
+  parseTranslationReply, pickGlossary, placeOf, reviewSuggestions, roleOf,
 } = await import(
   new URL(`./core.js${new URL(import.meta.url).search}`, import.meta.url).href
 );
@@ -304,19 +304,46 @@ class PolyglotPanel extends HTMLElement {
     }
     const dict = (this._config && this._language && this._config.translations[this._language]) || {};
     // Translations whose area, floor, device or entity no longer exists (renamed or removed).
-    const exists = { area: (id) => h.areas[id], floor: (id) => (h.floors || {})[id], device: (id) => h.devices[id], entity: (id) => h.states[id] };
-    if (exists[this._type]) {
-      const prefix = `${this._type}:`;
-      for (const key of Object.keys(dict)) {
-        if (key.startsWith(prefix) && !exists[this._type](key.slice(prefix.length))) {
-          rows.push({ key, original: key.slice(prefix.length), context: 'No longer exists (renamed or removed). Clear to delete.', orphan: true });
-        }
+    const prefix = `${this._type}:`;
+    for (const key of this._orphans()) {
+      if (key.startsWith(prefix)) {
+        rows.push({ key, original: key.slice(prefix.length), context: 'No longer exists (renamed or removed). Clear to delete.', orphan: true });
       }
     }
     const q = this._search.trim().toLowerCase();
     if (q) rows = rows.filter((r) => [r.original, r.context, dict[r.key]].some((v) => v && String(v).toLowerCase().includes(q)));
     // Orphans first, so they get noticed.
     return rows.sort((a, b) => (b.orphan ? 1 : 0) - (a.orphan ? 1 : 0) || String(a.original).localeCompare(String(b.original)));
+  }
+
+  // Keys of the current language's translations whose area, floor, device or entity no longer exists, on any tab.
+  // A disabled entity has no state but is still in the registry, so its translation is kept.
+  _orphans() {
+    const h = this._hass;
+    const dict = (this._config && this._language && this._config.translations[this._language]) || {};
+    const registry = this._registry || new Map();
+    return orphanKeys(dict, {
+      area: (id) => h.areas[id],
+      floor: (id) => (h.floors || {})[id],
+      device: (id) => h.devices[id],
+      entity: (id) => h.states[id] || h.entities[id] || registry.has(id),
+    });
+  }
+
+  // Deletes every translation of the current language whose area, floor, device or entity no longer exists.
+  async _removeOrphans() {
+    this._confirmCleanup = false;
+    const keys = this._orphans();
+    if (!keys.length) { this._render(); return; }
+    await this._ws({ type: 'polyglot/set_many', language: this._language, values: Object.fromEntries(keys.map((k) => [k, null])) });
+    const dict = this._config.translations[this._language] || {};
+    for (const k of keys) {
+      delete dict[k];
+      if (this._drafts) delete this._drafts[k];
+      this._unsure.delete(k);
+    }
+    this._notice = `Removed ${count(keys.length, 'translation', 'translations')} of things that no longer exist.`;
+    this._render();
   }
 
   async _save(key, value) {
@@ -699,6 +726,8 @@ class PolyglotPanel extends HTMLElement {
     const aiEntity = this._aiEntity || (this._userSettings && this._userSettings.ai_task_entity) || aiTasks[0];
     const done = allRows.filter((r) => dict[r.key]).length;
     const showToggle = ['device', 'entity', 'state'].includes(this._type);
+    const orphanCount = c && lang ? this._orphans().length : 0;
+    if (!orphanCount) this._confirmCleanup = false;
     // Keep focus, caret and any unsaved typing across a redraw (it rebuilds every field).
     const active = this.shadowRoot.activeElement;
     const focusedKey = active && active.dataset ? active.dataset.key : null;
@@ -769,6 +798,9 @@ class PolyglotPanel extends HTMLElement {
             ${lang && !this._adding ? (this._confirmRemove
     ? `<span>Remove ${esc(lang)} and its ${Object.keys(dict).length} translations?</span><button id="remove-yes">Remove</button><button id="remove-no">Keep</button>`
     : '<button id="remove-lang">Remove language</button>') : ''}
+            ${orphanCount && !this._adding ? (this._confirmCleanup
+    ? `<span>Remove ${count(orphanCount, 'translation', 'translations')} of areas, floors, devices or entities that no longer exist?</span><button id="cleanup-yes">Remove</button><button id="cleanup-no">Keep</button>`
+    : `<button id="cleanup" title="Translations of areas, floors, devices and entities that were removed or got a new ID. Dashboard text and state values are not touched.">Clean up ${orphanCount} no longer existing</button>`) : ''}
           </div>
           <div class="bar">
             <label><input type="checkbox" id="me-text" ${this._userSettings && this._userSettings.dashboard_text_for_admin ? 'checked' : ''}>
@@ -835,7 +867,7 @@ class PolyglotPanel extends HTMLElement {
     const me = $('#me-text');
     if (me) me.onchange = (ev) => this._setDashboardTextForMe(ev.target.checked).catch(fail);
     const sel = $('#lang');
-    if (sel) sel.onchange = async (ev) => { this._language = ev.target.value; this._confirmRemove = false; await this._loadHaTranslations(); this._render(); };
+    if (sel) sel.onchange = async (ev) => { this._language = ev.target.value; this._confirmRemove = false; this._confirmCleanup = false; await this._loadHaTranslations(); this._render(); };
     const on = (id, fn) => { const b = $(id); if (b) b.onclick = fn; };
     on('#add-lang', () => { this._adding = true; this._render(); const i = $('#new-lang'); if (i) i.focus(); });
     on('#add-cancel', () => { this._adding = false; this._error = null; this._render(); });
@@ -845,6 +877,9 @@ class PolyglotPanel extends HTMLElement {
     on('#remove-lang', () => { this._confirmRemove = true; this._render(); });
     on('#remove-no', () => { this._confirmRemove = false; this._render(); });
     on('#remove-yes', () => this._removeLanguage().catch(fail));
+    on('#cleanup', () => { this._confirmCleanup = true; this._render(); });
+    on('#cleanup-no', () => { this._confirmCleanup = false; this._render(); });
+    on('#cleanup-yes', () => this._removeOrphans().catch(fail));
     this.shadowRoot.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { this._type = b.dataset.type; this._notice = null; this._pasting = false; this._render(); }; });
     const search = $('#search');
     if (search) {
