@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-11-18)
+
+### Added
+- **Clean up no longer existing**: a button on the Translations page that removes, after a confirmation, every
+  translation of the chosen language whose area, floor, device or entity was removed or got a new ID. Disabled
+  entities keep theirs. Dashboard text and state values are not touched.
+
 ## 0.3.0 (2026-11-15)
 
 ### Added
